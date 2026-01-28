@@ -6,342 +6,632 @@ const PDFDocument = require("pdfkit");
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// -------- Env --------
-const API_TOKEN = process.env.API_TOKEN || "";
-const DB_USER = process.env.DB_USER || "";
-const DB_PASSWORD = process.env.DB_PASSWORD || "";
-const DB_NAME = process.env.DB_NAME || "";
-const DB_SOCKET_PATH = process.env.DB_SOCKET_PATH || ""; // /cloudsql/...
-const GCS_BUCKET = process.env.GCS_BUCKET || "";
+/* ================= CONFIGURATION ================= */
+const config = {
+  apiToken: process.env.API_TOKEN,
+  database: {
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    socketPath: process.env.DB_SOCKET_PATH,
+    waitForConnections: true,
+    connectionLimit: 10,
+    timezone: "America/Mexico_City",
+  },
+  gcs: {
+    bucket: process.env.GCS_BUCKET,
+  },
+  port: process.env.PORT || 8080,
+  timezone: "America/Mexico_City",
+};
 
-if (!API_TOKEN || !DB_USER || !DB_PASSWORD || !DB_NAME || !DB_SOCKET_PATH || !GCS_BUCKET) {
-  console.warn("⚠️ Missing required env vars. Check API_TOKEN, DB_*, GCS_BUCKET.");
+/* ================= VALIDATION ================= */
+function validateConfig() {
+  const required = ["apiToken", "database.user", "database.password", "database.database", "gcs.bucket"];
+  const missing = required.filter(key => {
+    const value = key.split(".").reduce((obj, k) => obj?.[k], config);
+    return !value;
+  });
+  
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  }
 }
 
-// -------- Auth middleware (simple token) --------
+validateConfig();
+
+/* ================= MIDDLEWARE ================= */
 function requireToken(req, res, next) {
-  const token = (req.headers["x-api-token"] || "").toString();
-  if (!token || token !== API_TOKEN) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  const token = req.headers["x-api-token"];
+  
+  if (!token) {
+    return res.status(401).json({ ok: false, error: "Token requerido" });
   }
+  
+  if (token !== config.apiToken) {
+    return res.status(401).json({ ok: false, error: "Token inválido" });
+  }
+  
   next();
 }
 
-// -------- DB pool via Cloud SQL Unix socket --------
-const pool = mysql.createPool({
-  user: DB_USER,
-  password: DB_PASSWORD,
-  database: DB_NAME,
-  socketPath: DB_SOCKET_PATH,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  // optional:
-  // timezone: "Z",
-});
+function errorHandler(err, req, res, next) {
+  console.error("Error:", err);
+  
+  const status = err.statusCode || 500;
+  const message = err.message || "Error interno del servidor";
+  
+  res.status(status).json({ 
+    ok: false, 
+    error: message,
+    ...(process.env.NODE_ENV === "development" && { stack: err.stack })
+  });
+}
 
+/* ================= DATABASE ================= */
+const pool = mysql.createPool(config.database);
+
+async function getConnection() {
+  try {
+    const conn = await pool.getConnection();
+    await conn.query(`SET time_zone = ?`, [config.timezone]);
+    return conn;
+  } catch (error) {
+    console.error("Error al obtener conexión:", error);
+    throw new Error("Error de conexión a la base de datos");
+  }
+}
+
+async function executeInTransaction(callback) {
+  const conn = await getConnection();
+  
+  try {
+    await conn.beginTransaction();
+    const result = await callback(conn);
+    await conn.commit();
+    return result;
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+/* ================= GOOGLE CLOUD STORAGE ================= */
 const storage = new Storage();
+const bucket = storage.bucket(config.gcs.bucket);
 
-// -------- Helpers --------
-function ymNow() {
-  const now = new Date();
-  return { mes: now.getMonth() + 1, anio: now.getFullYear() };
+async function deleteFileIfExists(path) {
+  try {
+    await bucket.file(path).delete();
+  } catch (error) {
+    // Archivo no existe, ignorar
+    if (error.code !== 404) {
+      console.warn(`Error al eliminar archivo ${path}:`, error.message);
+    }
+  }
 }
 
-function gcsPathForRecibo(idRecibo, fecha = new Date()) {
-  const yyyy = fecha.getFullYear();
-  const mm = String(fecha.getMonth() + 1).padStart(2, "0");
-  return `recibos/${yyyy}/${mm}/recibo_${idRecibo}.pdf`;
-}
-
-async function uploadPdfBuffer(buffer, destinationPath) {
-  const bucket = storage.bucket(GCS_BUCKET);
-  const file = bucket.file(destinationPath);
+async function uploadPdfToGCS(buffer, path) {
+  const file = bucket.file(path);
+  
   await file.save(buffer, {
     contentType: "application/pdf",
     resumable: false,
-    metadata: {
+    metadata: { 
       cacheControl: "no-store",
+      contentDisposition: `inline; filename="${path.split('/').pop()}"`,
     },
   });
-  // Ruta guardable: gs://...
-  return `gs://${GCS_BUCKET}/${destinationPath}`;
+  
+  return `gs://${config.gcs.bucket}/${path}`;
 }
 
-async function renderReciboPdfSimple({ recibo, detalles }) {
-  // PDF simple (placeholder). Puedes luego meter plantilla HTML si quieres.
+/* ================= DATE HELPERS ================= */
+function getCurrentDateInMX() {
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: config.timezone })
+  );
+}
+
+function getYearMonthDay() {
+  const date = getCurrentDateInMX();
+  return {
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+    day: date.getDate(),
+  };
+}
+
+function generateCorteId(recibo) {
+  const { year, month, day } = getYearMonthDay();
+  const monthStr = String(month).padStart(2, "0");
+  const dayStr = String(day).padStart(2, "0");
+  
+  return `${recibo.id_usuario}-${recibo.id_plantel}-${year}${monthStr}${dayStr}`;
+}
+
+/* ================= PATH HELPERS ================= */
+function getReciboPdfPath(nombre) {
+  return `recibos/${nombre}.pdf`;
+}
+
+function getCortePdfPath(nombre) {
+  return `cortes/${nombre}.pdf`;
+}
+
+/* ================= PDF GENERATION ================= */
+async function generateReciboPDF(recibo, detalles, opciones = {}) {
+  const { cancelado = false } = opciones;
+  
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "LETTER", margin: 40 });
-    const chunks = [];
-    doc.on("data", (c) => chunks.push(c));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+    try {
+      const doc = new PDFDocument({ 
+        size: "LETTER", 
+        margin: 40,
+        info: {
+          Title: `Recibo ${recibo.id_recibo}`,
+          Author: "Sistema BGK",
+        }
+      });
+      
+      const chunks = [];
+      doc.on("data", chunk => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
 
-    doc.fontSize(16).text("RECIBO", { align: "center" });
-    doc.moveDown();
+      // Header
+      doc.fontSize(16).text("RECIBO", { align: "center" });
+      
+      if (cancelado) {
+        doc.moveDown();
+        doc.fontSize(22).fillColor("red").text("CANCELADO", { align: "center" });
+        doc.fillColor("black");
+      }
 
-    doc.fontSize(11).text(`ID Recibo: ${recibo.id_recibo}`);
-    doc.text(`Alumno: ${recibo.id_alumno}`);
-    doc.text(`Plantel cobro: ${recibo.id_plantel}`);
-    doc.text(`Fecha: ${new Date(recibo.fecha).toISOString()}`);
-    doc.moveDown();
+      // Información del recibo
+      doc.moveDown();
+      doc.fontSize(10)
+        .text(`Folio: ${recibo.id_recibo}`)
+        .text(`Alumno: ${recibo.id_alumno}`)
+        .text(`Plantel: ${recibo.id_plantel}`)
+        .text(`Fecha: ${new Date(recibo.fecha).toLocaleString("es-MX", { timeZone: config.timezone })}`);
 
-    doc.fontSize(12).text("Detalle:", { underline: true });
-    doc.moveDown(0.5);
+      // Detalle
+      doc.moveDown();
+      doc.fontSize(12).text("Detalle de cobro", { underline: true });
+      doc.moveDown(0.5);
 
-    let total = 0;
-    for (const d of detalles) {
-      const label = `${d.id_producto} ${d.frecuencia_producto}${d.mes ? ` ${d.mes}/${d.anio}` : ""}`;
-      doc.fontSize(10).text(`${label}  -  $${Number(d.precio_final).toFixed(2)}`);
-      total += Number(d.precio_final || 0);
+      let subtotal = 0;
+      detalles.forEach(detalle => {
+        const precio = Number(detalle.precio_final);
+        subtotal += precio;
+        
+        doc.fontSize(10).text(
+          `${detalle.id_producto.padEnd(30)} $${precio.toFixed(2)}`
+        );
+      });
+
+      // Total
+      doc.moveDown();
+      doc.fontSize(12).text(
+        `TOTAL: $${Number(recibo.total_recibo).toFixed(2)}`,
+        { align: "right", bold: true }
+      );
+
+      doc.end();
+    } catch (error) {
+      reject(error);
     }
-    doc.moveDown();
-    doc.fontSize(12).text(`Total: $${Number(total).toFixed(2)}`, { align: "right" });
-
-    doc.end();
   });
 }
 
-// =====================================================
-// 1) CRON: Generar cargos mensuales
-// POST /cron/generar-cargos
-// =====================================================
-app.post("/cron/generar-cargos", requireToken, async (req, res) => {
-  const { mes, anio } = req.body?.mes && req.body?.anio ? req.body : ymNow();
-
-  const conn = await pool.getConnection();
-  try {
-    // Inserta cargos faltantes del mes para alumnos activos y productos mensuales asignados.
-    // Usa INSERT IGNORE para respetar UNIQUE uq_cargo (id_alumno,id_producto,mes,anio).
-    const sql = `
-      INSERT IGNORE INTO alumnos_cargos (
-        id_cargo, id_alumno, id_producto, mes, anio, status_cargo, id_recibo, created_at, updated_at
-      )
-      SELECT
-        UUID(), a.id_alumno, am.id_producto, ?, ?, 'Pendiente', NULL, NOW(), NOW()
-      FROM alumnos a
-      JOIN alumnos_mensuales am ON am.id_alumno = a.id_alumno
-      JOIN productos p ON p.id_producto = am.id_producto
-      WHERE a.status = 'Activo'
-        AND p.frecuencia = 'Mensual'
-    `;
-    const [result] = await conn.execute(sql, [mes, anio]);
-
-    res.json({
-      ok: true,
-      mes,
-      anio,
-      insertedApprox: result?.affectedRows ?? null,
-      note: "INSERT IGNORE: si ya existía el cargo (UNIQUE), no lo duplica.",
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    conn.release();
-  }
-});
-
-// =====================================================
-// 2) Emitir recibo + “matar” cargos + generar PDF
-// POST /recibos/emitir
-// Body: { id_recibo: "..." }
-// =====================================================
-app.post("/recibos/emitir", requireToken, async (req, res) => {
-  const idRecibo = (req.body?.id_recibo || "").toString().trim();
-  if (!idRecibo) return res.status(400).json({ ok: false, error: "id_recibo requerido" });
-
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-
-    // 1) Traer recibo
-    const [recRows] = await conn.execute(
-      `SELECT * FROM recibos WHERE id_recibo = ? FOR UPDATE`,
-      [idRecibo]
-    );
-    if (recRows.length === 0) {
-      await conn.rollback();
-      return res.status(404).json({ ok: false, error: "Recibo no existe" });
-    }
-    const recibo = recRows[0];
-
-    // Si ya está emitido y con pdf, idempotencia suave
-    if (recibo.status_recibo === "Emitido" && recibo.ruta_pdf) {
-      await conn.commit();
-      return res.json({ ok: true, already: true, ruta_pdf: recibo.ruta_pdf });
-    }
-
-    // 2) Traer detalles
-    const [detalles] = await conn.execute(
-      `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
-      [idRecibo]
-    );
-
-    // 3) “Matar” cargos (solo para detalles Mensual con mes/anio)
-    // Regla: 1 detalle mensual corresponde a 1 cargo mensual por (alumno, producto, mes, anio)
-    for (const d of detalles) {
-      if (d.frecuencia_producto !== "Mensual") continue;
-      if (!d.mes || !d.anio) continue;
-
-      // Buscar cargo pendiente del alumno para ese producto/mes/año y bloquearlo
-      const [cargoRows] = await conn.execute(
-        `
-        SELECT * FROM alumnos_cargos
-        WHERE id_alumno = ?
-          AND id_producto = ?
-          AND mes = ?
-          AND anio = ?
-        FOR UPDATE
-        `,
-        [recibo.id_alumno, d.id_producto, d.mes, d.anio]
-      );
-
-      if (cargoRows.length === 0) {
-        await conn.rollback();
-        return res.status(409).json({
-          ok: false,
-          error: "Cargo no encontrado para detalle mensual",
-          detail: { id_producto: d.id_producto, mes: d.mes, anio: d.anio },
-        });
-      }
-
-      const cargo = cargoRows[0];
-
-      // Validaciones simples
-      if (cargo.status_cargo === "Cancelado") {
-        await conn.rollback();
-        return res.status(409).json({ ok: false, error: "Cargo cancelado, no se puede pagar", id_cargo: cargo.id_cargo });
-      }
-      if (cargo.status_cargo === "Pagado" && cargo.id_recibo && cargo.id_recibo !== idRecibo) {
-        await conn.rollback();
-        return res.status(409).json({ ok: false, error: "Cargo ya pagado en otro recibo", id_cargo: cargo.id_cargo });
-      }
-
-      // Marcar pagado y asociar recibo
-      await conn.execute(
-        `
-        UPDATE alumnos_cargos
-        SET status_cargo = 'Pagado',
-            id_recibo = ?,
-            updated_at = NOW()
-        WHERE id_cargo = ?
-        `,
-        [idRecibo, cargo.id_cargo]
-      );
-    }
-
-    // 4) Marcar recibo como emitido y set generando_pdf
-    await conn.execute(
-      `
-      UPDATE recibos
-      SET status_recibo = 'Emitido',
-          generando_pdf = 1,
-          fecha = COALESCE(fecha, NOW())
-      WHERE id_recibo = ?
-      `,
-      [idRecibo]
-    );
-
-    await conn.commit();
-
-    // 5) Generar PDF (fuera de transacción)
-    // Volvemos a leer recibo/detalle (sin FOR UPDATE)
-    const [recFinal] = await pool.execute(`SELECT * FROM recibos WHERE id_recibo = ?`, [idRecibo]);
-    const [detFinal] = await pool.execute(`SELECT * FROM recibos_detalle WHERE id_recibo = ?`, [idRecibo]);
-    const reciboFinal = recFinal[0];
-
-    const pdfBuffer = await renderReciboPdfSimple({ recibo: reciboFinal, detalles: detFinal });
-
-    const dest = gcsPathForRecibo(idRecibo, new Date(reciboFinal.fecha || Date.now()));
-    const ruta = await uploadPdfBuffer(pdfBuffer, dest);
-
-    await pool.execute(
-      `
-      UPDATE recibos
-      SET ruta_pdf = ?,
-          generando_pdf = 0
-      WHERE id_recibo = ?
-      `,
-      [ruta, idRecibo]
-    );
-
-    res.json({ ok: true, id_recibo: idRecibo, ruta_pdf: ruta });
-  } catch (e) {
-    console.error(e);
-    try { await conn.rollback(); } catch (_) {}
-    // Best-effort: limpiar bandera si falló después de emitir
+async function generateCortePDF(corte) {
+  return new Promise((resolve, reject) => {
     try {
-      await pool.execute(`UPDATE recibos SET generando_pdf = 0 WHERE id_recibo = ?`, [idRecibo]);
-    } catch (_) {}
-    res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    conn.release();
-  }
-});
+      const doc = new PDFDocument({ 
+        size: "LETTER", 
+        margin: 40,
+        info: {
+          Title: `Corte ${corte.id_corte}`,
+          Author: "Sistema BGK",
+        }
+      });
+      
+      const chunks = [];
+      doc.on("data", chunk => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
 
-// =====================================================
-// 3) CRON: Reparar PDFs faltantes
-// POST /cron/reparar-pdfs
-// Body opcional: { limit: 50 }
-// =====================================================
-app.post("/cron/reparar-pdfs", requireToken, async (req, res) => {
-  const limit = Number(req.body?.limit || 50);
-  try {
-    const [rows] = await pool.execute(
-      `
-      SELECT id_recibo
-      FROM recibos
-      WHERE status_recibo = 'Emitido'
-        AND ruta_pdf IS NULL
-        AND (generando_pdf = 0 OR generando_pdf IS NULL)
-      ORDER BY fecha ASC
-      LIMIT ?
-      `,
-      [limit]
+      // Header
+      doc.fontSize(16).text("CORTE DE CAJA", { align: "center" });
+      doc.moveDown();
+
+      // Información del corte
+      doc.fontSize(10)
+        .text(`Corte: ${corte.id_corte}`)
+        .text(`Plantel: ${corte.id_plantel}`)
+        .text(`Usuario: ${corte.id_usuario}`)
+        .text(`Fecha: ${corte.fecha}`);
+
+      // Totales
+      doc.moveDown();
+      doc.fontSize(12).text("Totales por método de pago", { underline: true });
+      doc.moveDown(0.5);
+
+      const efectivo = Number(corte.total_efectivo);
+      const tarjeta = Number(corte.total_tarjeta);
+      const transferencia = Number(corte.total_transferencia);
+      const gastos = Number(corte.gastos_efectivo);
+      const total = Number(corte.total);
+
+      doc.fontSize(10)
+        .text(`Efectivo:       $${efectivo.toFixed(2)}`)
+        .text(`Tarjeta:        $${tarjeta.toFixed(2)}`)
+        .text(`Transferencia:  $${transferencia.toFixed(2)}`)
+        .text(`Gastos efectivo: -$${gastos.toFixed(2)}`)
+        .moveDown()
+        .fontSize(12)
+        .text(`TOTAL: $${total.toFixed(2)}`, { align: "right", bold: true });
+
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+/* ================= BUSINESS LOGIC ================= */
+async function calculateReciboTotal(conn, reciboId) {
+  // Obtener recibo
+  const [[recibo]] = await conn.execute(
+    `SELECT * FROM recibos WHERE id_recibo = ? AND status_recibo = 'Borrador' FOR UPDATE`,
+    [reciboId]
+  );
+  
+  if (!recibo) {
+    throw new Error("Recibo no encontrado o no está en estado Borrador");
+  }
+
+  // Obtener detalles
+  const [detalles] = await conn.execute(
+    `SELECT * FROM recibos_detalle 
+     WHERE id_recibo = ? AND status_detalle = 'Borrador'`,
+    [reciboId]
+  );
+
+  if (detalles.length === 0) {
+    throw new Error("El recibo no tiene detalles");
+  }
+
+  const { year, month } = getYearMonthDay();
+  let totalRecibo = 0;
+
+  // Calcular cada detalle
+  for (const detalle of detalles) {
+    let precioBase = Number(detalle.precio_base);
+    let descuento = 0;
+    let recargo = 0;
+    let beca = 0;
+
+    // Verificar si está vencido
+    const isVencido = detalle.mes && detalle.anio && 
+      (detalle.anio < year || (detalle.anio === year && detalle.mes < month));
+
+    // Obtener reglas aplicables
+    const [reglas] = await conn.execute(
+      `SELECT * FROM reglas_producto
+       WHERE id_producto = ?
+         AND (fecha_inicio IS NULL OR fecha_inicio <= CURDATE())
+         AND (fecha_fin IS NULL OR fecha_fin >= CURDATE())
+         AND (? = 0 OR esvencido = 1)
+         AND FIND_IN_SET(?, forma_pago) > 0
+       ORDER BY prioridad DESC`,
+      [detalle.id_producto, isVencido ? 1 : 0, recibo.forma_pago]
     );
 
-    const reparados = [];
-    const fallos = [];
-
-    for (const r of rows) {
-      const idRecibo = r.id_recibo;
-
-      try {
-        // Reusar la misma lógica de pdf: generamos pdf y actualizamos ruta.
-        const [recFinal] = await pool.execute(`SELECT * FROM recibos WHERE id_recibo = ?`, [idRecibo]);
-        const [detFinal] = await pool.execute(`SELECT * FROM recibos_detalle WHERE id_recibo = ?`, [idRecibo]);
-        const reciboFinal = recFinal[0];
-        if (!reciboFinal) continue;
-
-        // marcar bandera
-        await pool.execute(`UPDATE recibos SET generando_pdf = 1 WHERE id_recibo = ?`, [idRecibo]);
-
-        const pdfBuffer = await renderReciboPdfSimple({ recibo: reciboFinal, detalles: detFinal });
-        const dest = gcsPathForRecibo(idRecibo, new Date(reciboFinal.fecha || Date.now()));
-        const ruta = await uploadPdfBuffer(pdfBuffer, dest);
-
-        await pool.execute(
-          `UPDATE recibos SET ruta_pdf = ?, generando_pdf = 0 WHERE id_recibo = ?`,
-          [ruta, idRecibo]
-        );
-        reparados.push({ id_recibo: idRecibo, ruta_pdf: ruta });
-      } catch (e) {
-        console.error("reparar-pdfs fallo", idRecibo, e);
-        try { await pool.execute(`UPDATE recibos SET generando_pdf = 0 WHERE id_recibo = ?`, [idRecibo]); } catch (_) {}
-        fallos.push({ id_recibo: idRecibo, error: e.message });
+    // Aplicar reglas
+    for (const regla of reglas) {
+      if (regla.pct_descuento) {
+        descuento += precioBase * (regla.pct_descuento / 100);
+      }
+      if (regla.pct_recargo) {
+        recargo += precioBase * (regla.pct_recargo / 100);
       }
     }
 
-    res.json({ ok: true, encontrados: rows.length, reparados, fallos });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: e.message });
+    // Aplicar beca si es producto mensual
+    if (detalle.frecuencia_producto === "Mensual") {
+      const [[alumnoMensual]] = await conn.execute(
+        `SELECT beca_monto FROM alumnos_mensuales
+         WHERE id_alumno = ? AND id_producto = ?`,
+        [recibo.id_alumno, detalle.id_producto]
+      );
+      beca = Number(alumnoMensual?.beca_monto || 0);
+    }
+
+    // Calcular precio final
+    const montoAjuste = Number(detalle.monto_ajuste || 0);
+    const precioCalculado = precioBase - descuento - beca + recargo + montoAjuste;
+    const precioFinal = Math.max(0, precioCalculado);
+
+    // Actualizar detalle
+    await conn.execute(
+      `UPDATE recibos_detalle
+       SET descuento = ?, recargo = ?, beca = ?, precio_final = ?
+       WHERE id_detalle = ?`,
+      [descuento, recargo, beca, precioFinal, detalle.id_detalle]
+    );
+
+    totalRecibo += precioFinal;
+  }
+
+  // Actualizar total del recibo
+  await conn.execute(
+    `UPDATE recibos SET total_recibo = ? WHERE id_recibo = ?`,
+    [totalRecibo, reciboId]
+  );
+
+  return { reciboId, total: totalRecibo };
+}
+
+/* ================= ENDPOINTS ================= */
+
+// Calcular recibo
+app.post("/calcular-recibo", requireToken, async (req, res, next) => {
+  try {
+    const { id_recibo } = req.body;
+    
+    if (!id_recibo) {
+      return res.status(400).json({ ok: false, error: "id_recibo es requerido" });
+    }
+
+    const result = await executeInTransaction(async (conn) => {
+      return await calculateReciboTotal(conn, id_recibo);
+    });
+
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    next(error);
   }
 });
 
-// Healthcheck
-app.get("/health", (req, res) => res.json({ ok: true }));
+// Emitir recibo
+app.post("/emitir-recibo", requireToken, async (req, res, next) => {
+  try {
+    const { id_recibo, nombre_recibo } = req.body;
+    
+    if (!id_recibo || !nombre_recibo) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: "id_recibo y nombre_recibo son requeridos" 
+      });
+    }
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`billing_service listening on :${port}`));
+    const result = await executeInTransaction(async (conn) => {
+      // Obtener recibo
+      const [[recibo]] = await conn.execute(
+        `SELECT * FROM recibos WHERE id_recibo = ? AND status_recibo = 'Borrador' FOR UPDATE`,
+        [id_recibo]
+      );
+      
+      if (!recibo) {
+        throw new Error("Recibo no encontrado o no está en estado Borrador");
+      }
+
+      const corteId = generateCorteId(recibo);
+
+      // Actualizar recibo a Emitido
+      await conn.execute(
+        `UPDATE recibos
+         SET status_recibo = 'Emitido', encorte = ?, fecha = NOW()
+         WHERE id_recibo = ?`,
+        [corteId, id_recibo]
+      );
+
+      // Actualizar detalles
+      await conn.execute(
+        `UPDATE recibos_detalle
+         SET status_detalle = 'Emitido'
+         WHERE id_recibo = ?`,
+        [id_recibo]
+      );
+
+      // Actualizar cargos del alumno (solo los que corresponden a detalles mensuales)
+      await conn.execute(
+        `UPDATE alumnos_cargos ac
+         JOIN recibos_detalle rd
+           ON rd.id_producto = ac.id_producto
+          AND rd.mes = ac.mes
+          AND rd.anio = ac.anio
+         SET ac.status_cargo = 'Pagado',
+             ac.id_recibo = ?
+         WHERE rd.id_recibo = ?
+           AND rd.frecuencia_producto = 'Mensual'`,
+        [id_recibo, id_recibo]
+      );
+
+      // Recalcular corte
+      await conn.execute(`CALL sp_recalcular_corte(?)`, [corteId]);
+
+      return { recibo, corteId };
+    });
+
+    // Generar y subir PDF
+    const [detalles] = await pool.execute(
+      `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
+      [id_recibo]
+    );
+
+    const pdfBuffer = await generateReciboPDF(result.recibo, detalles);
+    const pdfPath = getReciboPdfPath(nombre_recibo);
+    
+    await deleteFileIfExists(pdfPath);
+    const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
+
+    // Actualizar ruta del PDF
+    await pool.execute(
+      `UPDATE recibos SET ruta_pdf = ? WHERE id_recibo = ?`,
+      [rutaPdf, id_recibo]
+    );
+
+    res.json({ ok: true, ruta_pdf: rutaPdf });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Cancelar recibo
+app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
+  try {
+    const { id_recibo, nombre_recibo } = req.body;
+    
+    if (!id_recibo || !nombre_recibo) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: "id_recibo y nombre_recibo son requeridos" 
+      });
+    }
+
+    const result = await executeInTransaction(async (conn) => {
+      // Obtener recibo
+      const [[recibo]] = await conn.execute(
+        `SELECT * FROM recibos WHERE id_recibo = ? AND status_recibo = 'Emitido' FOR UPDATE`,
+        [id_recibo]
+      );
+      
+      if (!recibo) {
+        throw new Error("Recibo no encontrado o no está en estado Emitido");
+      }
+
+      // Cancelar recibo
+      await conn.execute(
+        `UPDATE recibos 
+         SET status_recibo = 'Cancelado', encorte = NULL 
+         WHERE id_recibo = ?`,
+        [id_recibo]
+      );
+
+      // Cancelar detalles
+      await conn.execute(
+        `UPDATE recibos_detalle 
+         SET status_detalle = 'Cancelado' 
+         WHERE id_recibo = ?`,
+        [id_recibo]
+      );
+
+      // Revertir cargos
+      await conn.execute(
+        `UPDATE alumnos_cargos 
+         SET status_cargo = 'Pendiente', id_recibo = NULL 
+         WHERE id_recibo = ?`,
+        [id_recibo]
+      );
+
+      // Recalcular corte anterior
+      if (recibo.encorte) {
+        await conn.execute(`CALL sp_recalcular_corte(?)`, [recibo.encorte]);
+      }
+
+      return { recibo };
+    });
+
+    // Generar PDF cancelado
+    const [detalles] = await pool.execute(
+      `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
+      [id_recibo]
+    );
+
+    const pdfBuffer = await generateReciboPDF(result.recibo, detalles, { cancelado: true });
+    const pdfPath = getReciboPdfPath(nombre_recibo);
+    
+    await deleteFileIfExists(pdfPath);
+    const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
+
+    // Actualizar ruta del PDF
+    await pool.execute(
+      `UPDATE recibos SET ruta_pdf = ? WHERE id_recibo = ?`,
+      [rutaPdf, id_recibo]
+    );
+
+    res.json({ ok: true, ruta_pdf: rutaPdf });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Generar PDF de corte
+app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
+  try {
+    const { idcorte, nombrecorte } = req.body;
+    
+    if (!idcorte || !nombrecorte) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: "idcorte y nombrecorte son requeridos" 
+      });
+    }
+
+    const result = await executeInTransaction(async (conn) => {
+      // Recalcular corte
+      await conn.execute(`CALL sp_recalcular_corte(?)`, [idcorte]);
+
+      // Obtener datos del corte
+      const [[corte]] = await conn.execute(
+        `SELECT * FROM cortes WHERE id_corte = ? FOR UPDATE`,
+        [idcorte]
+      );
+      
+      if (!corte) {
+        throw new Error("Corte no encontrado");
+      }
+
+      return { corte };
+    });
+
+    // Generar y subir PDF
+    const pdfBuffer = await generateCortePDF(result.corte);
+    const pdfPath = getCortePdfPath(nombrecorte);
+    
+    await deleteFileIfExists(pdfPath);
+    const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
+
+    // Actualizar ruta del PDF
+    await pool.execute(
+      `UPDATE cortes SET ruta_pdf = ?, enimpresion = FALSE WHERE id_corte = ?`,
+      [rutaPdf, idcorte]
+    );
+
+    res.json({ ok: true, ruta_pdf: rutaPdf });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Health check
+app.get("/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true, status: "healthy", timestamp: new Date().toISOString() });
+  } catch (error) {
+    res.status(503).json({ ok: false, status: "unhealthy", error: error.message });
+  }
+});
+
+// Error handler (debe ir al final)
+app.use(errorHandler);
+
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM recibido, cerrando servidor...");
+  await pool.end();
+  process.exit(0);
+});
+
+// Start server
+app.listen(config.port, () => {
+  console.log(`🚀 BGK Backend ejecutándose en puerto ${config.port}`);
+  console.log(`   Entorno: ${process.env.NODE_ENV || "development"}`);
+  console.log(`   Timezone: ${config.timezone}`);
+});
