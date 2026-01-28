@@ -422,13 +422,18 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
 
       const corteId = generateCorteId(recibo);
 
-      // Actualizar recibo a Emitido
-      await conn.execute(
-        `UPDATE recibos
-         SET status_recibo = 'Emitido', encorte = ?, fecha = NOW()
-         WHERE id_recibo = ?`,
-        [corteId, id_recibo]
-      );
+      
+// Actualizar recibo a Emitido y apagar flag técnico
+await conn.execute(
+  `UPDATE recibos
+   SET status_recibo = 'Emitido',
+       encorte = ?,
+       fecha = NOW(),
+       enimpresion = FALSE
+   WHERE id_recibo = ?`,
+  [corteId, id_recibo]
+);
+
 
       // Actualizar detalles
       await conn.execute(
