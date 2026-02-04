@@ -284,20 +284,26 @@ async function generateCortePDF(corte) {
 
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
-  // Obtener recibo
+  //  Obtener recibo
   const [[recibo]] = await conn.execute(
-    `SELECT * FROM recibos WHERE id_recibo = ? AND status_recibo = 'Borrador' FOR UPDATE`,
+    `SELECT * 
+     FROM recibos 
+     WHERE id_recibo = ? 
+       AND status_recibo = 'Borrador'
+     FOR UPDATE`,
     [reciboId]
   );
-  
+
   if (!recibo) {
     throw new Error("Recibo no encontrado o no está en estado Borrador");
   }
 
   // Obtener detalles
   const [detalles] = await conn.execute(
-    `SELECT * FROM recibos_detalle 
-     WHERE id_recibo = ? AND status_detalle = 'Borrador'`,
+    `SELECT * 
+     FROM recibos_detalle
+     WHERE id_recibo = ?
+       AND status_detalle = 'Borrador'`,
     [reciboId]
   );
 
@@ -308,30 +314,44 @@ async function calculateReciboTotal(conn, reciboId) {
   const { year, month } = getYearMonthDay();
   let totalRecibo = 0;
 
-  // Calcular cada detalle
+  //  Calcular cada detalle
   for (const detalle of detalles) {
-    let precioBase = Number(detalle.precio_base);
+    const precioBase = Number(detalle.precio_base);
     let descuento = 0;
     let recargo = 0;
     let beca = 0;
 
-    // Verificar si está vencido
-    const isVencido = detalle.mes && detalle.anio && 
-      (detalle.anio < year || (detalle.anio === year && detalle.mes < month));
+    // Determinar caso del cargo
+    let caso = "Corriente";
+    if (detalle.mes && detalle.anio) {
+      if (
+        detalle.anio < year ||
+        (detalle.anio === year && detalle.mes < month)
+      ) {
+        caso = "Vencido";
+      }
+    }
 
-    // Obtener reglas aplicables
+    //  Obtener reglas aplicables
     const [reglas] = await conn.execute(
-      `SELECT * FROM reglas_producto
-       WHERE id_producto = ?
-         AND (fecha_inicio IS NULL OR fecha_inicio <= CURDATE())
-         AND (fecha_fin IS NULL OR fecha_fin >= CURDATE())
-         AND (? = 0 OR esvencido = 1)
-         AND FIND_IN_SET(?, forma_pago) > 0
-       ORDER BY prioridad DESC`,
-      [detalle.id_producto, isVencido ? 1 : 0, recibo.forma_pago]
+      `
+      SELECT rp.*
+      FROM reglas_producto rp
+      JOIN reglas_producto_formas_pago rpfp
+        ON rpfp.id_regla = rp.id_regla
+      JOIN reglas_producto_casos rpc
+        ON rpc.id_regla = rp.id_regla
+      WHERE rp.id_producto = ?
+        AND rpfp.forma_pago = ?
+        AND rpc.caso = ?
+        AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= CURDATE())
+        AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= CURDATE())
+      ORDER BY rp.prioridad DESC
+      `,
+      [detalle.id_producto, recibo.forma_pago, caso]
     );
 
-    // Aplicar reglas
+    //  Aplicar reglas
     for (const regla of reglas) {
       if (regla.pct_descuento) {
         descuento += precioBase * (regla.pct_descuento / 100);
@@ -341,35 +361,51 @@ async function calculateReciboTotal(conn, reciboId) {
       }
     }
 
-    // Aplicar beca si es producto mensual
+    //  Aplicar beca si es mensual
     if (detalle.frecuencia_producto === "Mensual") {
       const [[alumnoMensual]] = await conn.execute(
-        `SELECT beca_monto FROM alumnos_mensuales
-         WHERE id_alumno = ? AND id_producto = ?`,
+        `
+        SELECT beca_monto
+        FROM alumnos_mensuales
+        WHERE id_alumno = ?
+          AND id_producto = ?
+        `,
         [recibo.id_alumno, detalle.id_producto]
       );
+
       beca = Number(alumnoMensual?.beca_monto || 0);
     }
 
-    // Calcular precio final
+    //  Calcular precio final
     const montoAjuste = Number(detalle.monto_ajuste || 0);
-    const precioCalculado = precioBase - descuento - beca + recargo + montoAjuste;
+    const precioCalculado =
+      precioBase - descuento - beca + recargo + montoAjuste;
+
     const precioFinal = Math.max(0, precioCalculado);
 
-    // Actualizar detalle
+    //  Guardar detalle
     await conn.execute(
-      `UPDATE recibos_detalle
-       SET descuento = ?, recargo = ?, beca = ?, precio_final = ?
-       WHERE id_detalle = ?`,
+      `
+      UPDATE recibos_detalle
+      SET descuento = ?,
+          recargo = ?,
+          beca = ?,
+          precio_final = ?
+      WHERE id_detalle = ?
+      `,
       [descuento, recargo, beca, precioFinal, detalle.id_detalle]
     );
 
     totalRecibo += precioFinal;
   }
 
-  // Actualizar total del recibo
+  //  Actualizar total del recibo
   await conn.execute(
-    `UPDATE recibos SET total_recibo = ? WHERE id_recibo = ?`,
+    `
+    UPDATE recibos
+    SET total_recibo = ?
+    WHERE id_recibo = ?
+    `,
     [totalRecibo, reciboId]
   );
 
