@@ -284,7 +284,7 @@ async function generateCortePDF(corte) {
 
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
-  //  Obtener recibo
+  // Obtener recibo
   const [[recibo]] = await conn.execute(
     `SELECT * 
      FROM recibos 
@@ -297,6 +297,12 @@ async function calculateReciboTotal(conn, reciboId) {
   if (!recibo) {
     throw new Error("Recibo no encontrado o no está en estado Borrador");
   }
+
+  if (!recibo.fecha) {
+    throw new Error("El recibo no tiene fecha operativa");
+  }
+
+  const [year, month] = recibo.fecha.split("-").map(Number);
 
   // Obtener detalles
   const [detalles] = await conn.execute(
@@ -311,20 +317,24 @@ async function calculateReciboTotal(conn, reciboId) {
     throw new Error("El recibo no tiene detalles");
   }
 
-  const { year, month } = getYearMonthDay();
   let totalRecibo = 0;
 
-  //  Calcular cada detalle
+  // Calcular cada detalle
   for (const detalle of detalles) {
     const precioBase = Number(detalle.precio_base);
     let descuento = 0;
     let recargo = 0;
     let beca = 0;
 
-    // Determinar caso del cargo
+    // Determinar caso del cargo (usando fecha del recibo)
     let caso = "Corriente";
     if (detalle.mes && detalle.anio) {
       if (
+        detalle.anio > year ||
+        (detalle.anio === year && detalle.mes > month)
+      ) {
+        caso = "Adelantado";
+      } else if (
         detalle.anio < year ||
         (detalle.anio === year && detalle.mes < month)
       ) {
@@ -332,7 +342,7 @@ async function calculateReciboTotal(conn, reciboId) {
       }
     }
 
-    //  Obtener reglas aplicables
+    // Obtener reglas aplicables (fecha operativa)
     const [reglas] = await conn.execute(
       `
       SELECT rp.*
@@ -344,14 +354,20 @@ async function calculateReciboTotal(conn, reciboId) {
       WHERE rp.id_producto = ?
         AND rpfp.forma_pago = ?
         AND rpc.caso = ?
-        AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= CURDATE())
-        AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= CURDATE())
+        AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
+        AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
       ORDER BY rp.prioridad DESC
       `,
-      [detalle.id_producto, recibo.forma_pago, caso]
+      [
+        detalle.id_producto,
+        recibo.forma_pago,
+        caso,
+        recibo.fecha,
+        recibo.fecha
+      ]
     );
 
-    //  Aplicar reglas
+    // Aplicar reglas
     for (const regla of reglas) {
       if (regla.pct_descuento) {
         descuento += precioBase * (regla.pct_descuento / 100);
@@ -361,7 +377,7 @@ async function calculateReciboTotal(conn, reciboId) {
       }
     }
 
-    //  Aplicar beca si es mensual
+    // Aplicar beca si es mensual
     if (detalle.frecuencia_producto === "Mensual") {
       const [[alumnoMensual]] = await conn.execute(
         `
@@ -376,14 +392,14 @@ async function calculateReciboTotal(conn, reciboId) {
       beca = Number(alumnoMensual?.beca_monto || 0);
     }
 
-    //  Calcular precio final
+    // Calcular precio final
     const montoAjuste = Number(detalle.monto_ajuste || 0);
     const precioCalculado =
       precioBase - descuento - beca + recargo + montoAjuste;
 
     const precioFinal = Math.max(0, precioCalculado);
 
-    //  Guardar detalle
+    // Guardar detalle
     await conn.execute(
       `
       UPDATE recibos_detalle
@@ -399,7 +415,7 @@ async function calculateReciboTotal(conn, reciboId) {
     totalRecibo += precioFinal;
   }
 
-  //  Actualizar total del recibo
+  // Actualizar total del recibo
   await conn.execute(
     `
     UPDATE recibos
@@ -411,6 +427,9 @@ async function calculateReciboTotal(conn, reciboId) {
 
   return { reciboId, total: totalRecibo };
 }
+
+
+
 
 /* ================= ENDPOINTS ================= */
 
@@ -464,11 +483,13 @@ await conn.execute(
   `UPDATE recibos
    SET status_recibo = 'Emitido',
        encorte = ?,
-       fecha = NOW(),
+       fecha_emision = NOW(),
        enimpresion = FALSE
    WHERE id_recibo = ?`,
   [corteId, id_recibo]
 );
+
+
 
 
       // Actualizar detalles
@@ -536,25 +557,31 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
     }
 
     const result = await executeInTransaction(async (conn) => {
-      // Obtener recibo
+      // 1. Obtener recibo
       const [[recibo]] = await conn.execute(
-        `SELECT * FROM recibos WHERE id_recibo = ? AND status_recibo = 'Emitido' FOR UPDATE`,
+        `SELECT *
+         FROM recibos
+         WHERE id_recibo = ?
+           AND status_recibo = 'Emitido'
+         FOR UPDATE`,
         [id_recibo]
       );
-      
+
       if (!recibo) {
         throw new Error("Recibo no encontrado o no está en estado Emitido");
       }
 
-      // Cancelar recibo
+      // 2. Cancelar recibo
       await conn.execute(
         `UPDATE recibos 
-         SET status_recibo = 'Cancelado', encorte = NULL 
+         SET status_recibo = 'Cancelado',
+             encorte = NULL,
+             fecha_cancelacion = NOW()
          WHERE id_recibo = ?`,
         [id_recibo]
       );
 
-      // Cancelar detalles
+      // 3. Cancelar detalles
       await conn.execute(
         `UPDATE recibos_detalle 
          SET status_detalle = 'Cancelado' 
@@ -562,15 +589,16 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
         [id_recibo]
       );
 
-      // Revertir cargos
+      // 4. Revertir cargos
       await conn.execute(
         `UPDATE alumnos_cargos 
-         SET status_cargo = 'Pendiente', id_recibo = NULL 
+         SET status_cargo = 'Pendiente',
+             id_recibo = NULL 
          WHERE id_recibo = ?`,
         [id_recibo]
       );
 
-      // Recalcular corte anterior
+      // 5. Recalcular corte anterior
       if (recibo.encorte) {
         await conn.execute(`CALL sp_recalcular_corte(?)`, [recibo.encorte]);
       }
@@ -578,19 +606,22 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
       return { recibo };
     });
 
-    // Generar PDF cancelado
+    // 6. Generar PDF cancelado (fuera de la transacción)
     const [detalles] = await pool.execute(
       `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
       [id_recibo]
     );
 
-    const pdfBuffer = await generateReciboPDF(result.recibo, detalles, { cancelado: true });
+    const pdfBuffer = await generateReciboPDF(
+      result.recibo,
+      detalles,
+      { cancelado: true }
+    );
+
     const pdfPath = getReciboPdfPath(nombre_recibo);
-    
     await deleteFileIfExists(pdfPath);
     const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
 
-    // Actualizar ruta del PDF
     await pool.execute(
       `UPDATE recibos SET ruta_pdf = ? WHERE id_recibo = ?`,
       [rutaPdf, id_recibo]
