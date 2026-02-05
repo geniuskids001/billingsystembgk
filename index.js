@@ -370,10 +370,10 @@ const month = fecha.getMonth() + 1;
     // Aplicar reglas
     for (const regla of reglas) {
       if (regla.pct_descuento) {
-        descuento += precioBase * (regla.pct_descuento / 100);
+        descuento += precioBase * regla.pct_descuento;
       }
       if (regla.pct_recargo) {
-        recargo += precioBase * (regla.pct_recargo / 100);
+        recargo += precioBase * regla.pct_recargo;
       }
     }
     // Aplicar beca si es mensual
@@ -419,7 +419,6 @@ const month = fecha.getMonth() + 1;
   );
   return { reciboId, total: totalRecibo };
 }
-
 
 
 /* ================= ENDPOINTS ================= */
