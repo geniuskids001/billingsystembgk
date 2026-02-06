@@ -300,8 +300,9 @@ async function calculateReciboTotal(conn, reciboId) {
     throw new Error("El recibo no tiene fecha operativa");
   }
   const fecha = new Date(recibo.fecha);
-const year = fecha.getFullYear();
-const month = fecha.getMonth() + 1;
+  const year = fecha.getFullYear();
+  const month = fecha.getMonth() + 1;
+  
   // Obtener detalles
   const [detalles] = await conn.execute(
     `SELECT * 
@@ -313,60 +314,98 @@ const month = fecha.getMonth() + 1;
   if (detalles.length === 0) {
     throw new Error("El recibo no tiene detalles");
   }
+  
   let totalRecibo = 0;
+  
   // Calcular cada detalle
   for (const detalle of detalles) {
     const precioBase = Number(detalle.precio_base);
     let descuento = 0;
     let recargo = 0;
     let beca = 0;
-    // Determinar caso del cargo (usando fecha del recibo)
-    let caso = "Corriente";
-    if (detalle.mes && detalle.anio) {
-      if (
-        detalle.anio > year ||
-        (detalle.anio === year && detalle.mes > month)
-      ) {
-        caso = "Adelantado";
-      } else if (
-        detalle.anio < year ||
-        (detalle.anio === year && detalle.mes < month)
-      ) {
-        caso = "Vencido";
+    
+    let reglas;
+    
+    if (detalle.frecuencia_producto === "Mensual") {
+      // Lógica para productos Mensuales (mantiene comportamiento actual)
+      let caso = "Corriente";
+      if (detalle.mes && detalle.anio) {
+        if (
+          detalle.anio > year ||
+          (detalle.anio === year && detalle.mes > month)
+        ) {
+          caso = "Adelantado";
+        } else if (
+          detalle.anio < year ||
+          (detalle.anio === year && detalle.mes < month)
+        ) {
+          caso = "Vencido";
+        }
       }
-    }
-    // Obtener reglas aplicables (fecha operativa)
-    const [reglas] = await conn.execute(
-      `
-      SELECT rp.*
-      FROM reglas_producto rp
-      JOIN reglas_producto_formas_pago rpfp
-        ON rpfp.id_regla = rp.id_regla
-      JOIN reglas_producto_casos rpc
-        ON rpc.id_regla = rp.id_regla
-      WHERE rp.id_producto = ?
-        AND rpfp.forma_pago = ?
-        AND rpc.caso = ?
-        AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
-        AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
-        AND (
-          rp.es_periodica = 0
-          OR (
-            rp.es_periodica = 1
-            AND DAY(?) BETWEEN rp.dia_mes_inicio AND rp.dia_mes_fin
+      
+      // Obtener reglas con caso
+      [reglas] = await conn.execute(
+        `
+        SELECT rp.*
+        FROM reglas_producto rp
+        JOIN reglas_producto_formas_pago rpfp
+          ON rpfp.id_regla = rp.id_regla
+        JOIN reglas_producto_casos rpc
+          ON rpc.id_regla = rp.id_regla
+        WHERE rp.id_producto = ?
+          AND rpfp.forma_pago = ?
+          AND rpc.caso = ?
+          AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
+          AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
+          AND (
+            rp.es_periodica = 0
+            OR (
+              rp.es_periodica = 1
+              AND DAY(?) BETWEEN rp.dia_mes_inicio AND rp.dia_mes_fin
+            )
           )
-        )
-      ORDER BY rp.prioridad DESC
-      `,
-      [
-        detalle.id_producto,
-        recibo.forma_pago,
-        caso,
-        recibo.fecha,
-        recibo.fecha,
-        recibo.fecha
-      ]
-    );
+        ORDER BY rp.prioridad DESC
+        `,
+        [
+          detalle.id_producto,
+          recibo.forma_pago,
+          caso,
+          recibo.fecha,
+          recibo.fecha,
+          recibo.fecha
+        ]
+      );
+    } else {
+      // Lógica para productos Unica (sin caso)
+      [reglas] = await conn.execute(
+        `
+        SELECT rp.*
+        FROM reglas_producto rp
+        JOIN reglas_producto_formas_pago rpfp
+          ON rpfp.id_regla = rp.id_regla
+        WHERE rp.id_producto = ?
+          AND rpfp.forma_pago = ?
+          AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
+          AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
+          AND (
+            rp.es_periodica = 0
+            OR (
+              rp.es_periodica = 1
+              AND DAY(?) BETWEEN rp.dia_mes_inicio AND rp.dia_mes_fin
+            )
+          )
+        ORDER BY rp.prioridad DESC
+        `,
+        [
+          detalle.id_producto,
+          recibo.forma_pago,
+          recibo.fecha,
+          recibo.fecha,
+          recibo.fecha
+        ]
+      );
+    }
+    
     // Aplicar reglas
     for (const regla of reglas) {
       if (regla.pct_descuento) {
@@ -376,6 +415,7 @@ const month = fecha.getMonth() + 1;
         recargo += precioBase * regla.pct_recargo;
       }
     }
+    
     // Aplicar beca si es mensual
     if (detalle.frecuencia_producto === "Mensual") {
       const [[alumnoMensual]] = await conn.execute(
@@ -387,13 +427,16 @@ const month = fecha.getMonth() + 1;
         `,
         [recibo.id_alumno, detalle.id_producto]
       );
-      beca = Number(alumnoMensual?.beca_monto || 0);
+      const becaPct = Number(alumnoMensual?.beca_monto || 0);
+      beca = precioBase * becaPct;
     }
+    
     // Calcular precio final
     const montoAjuste = Number(detalle.monto_ajuste || 0);
     const precioCalculado =
       precioBase - descuento - beca + recargo + montoAjuste;
-    const precioFinal = Math.max(0, precioCalculado);
+    const precioFinal = Math.max(0, Math.ceil(precioCalculado));
+    
     // Guardar detalle
     await conn.execute(
       `
@@ -406,8 +449,10 @@ const month = fecha.getMonth() + 1;
       `,
       [descuento, recargo, beca, precioFinal, detalle.id_detalle]
     );
+    
     totalRecibo += precioFinal;
   }
+  
   // Actualizar total del recibo
   await conn.execute(
     `
@@ -417,6 +462,7 @@ const month = fecha.getMonth() + 1;
     `,
     [totalRecibo, reciboId]
   );
+  
   return { reciboId, total: totalRecibo };
 }
 
