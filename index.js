@@ -490,166 +490,213 @@ app.post("/calcular-recibo", requireToken, async (req, res, next) => {
 
 // Emitir recibo
 app.post("/emitir-recibo", requireToken, async (req, res, next) => {
-  try {
-    const { id_recibo, nombre_recibo } = req.body;
-    
-    if (!id_recibo || !nombre_recibo) {
-      return res.status(400).json({ 
-        ok: false, 
-        error: "id_recibo y nombre_recibo son requeridos" 
-      });
-    }
+  const { id_recibo, nombre_recibo } = req.body;
 
-    const result = await executeInTransaction(async (conn) => {
-      // Obtener recibo
-      const [[recibo]] = await conn.execute(
-        `SELECT * FROM recibos WHERE id_recibo = ? AND status_recibo = 'Borrador' FOR UPDATE`,
+  if (!id_recibo || !nombre_recibo) {
+    return res.status(400).json({
+      ok: false,
+      error: "id_recibo y nombre_recibo son requeridos"
+    });
+  }
+
+  let recibo;
+  let corteId;
+
+  try {
+    await executeInTransaction(async (conn) => {
+
+      // 1️⃣ Lock del recibo
+      const [[row]] = await conn.execute(
+        `
+        SELECT *
+        FROM recibos
+        WHERE id_recibo = ?
+          AND status_recibo = 'Borrador'
+          AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+        FOR UPDATE
+        `,
         [id_recibo]
       );
-      
-      if (!recibo) {
-        throw new Error("Recibo no encontrado o no está en estado Borrador");
+
+      if (!row) {
+        throw new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
       }
 
-      const corteId = generateCorteId(recibo);
+      recibo = row;
 
-      
-// Actualizar recibo a Emitido y apagar flag técnico
-await conn.execute(
-  `UPDATE recibos
-   SET status_recibo = 'Emitido',
-       encorte = ?,
-       fecha_emision = NOW(),
-       enimpresion = FALSE
-   WHERE id_recibo = ?`,
-  [corteId, id_recibo]
-);
+      // 2️⃣ ANTIDUPLICADO MENSUAL (CLAVE)
+      const [duplicados] = await conn.execute(
+        `
+        SELECT 1
+        FROM recibos_detalle rd
+        JOIN recibos r
+          ON r.id_recibo = rd.id_recibo
+        WHERE rd.frecuencia_producto = 'Mensual'
+          AND rd.status_detalle = 'Emitido'
+          AND r.status_recibo = 'Emitido'
+          AND r.id_alumno = ?
+          AND EXISTS (
+            SELECT 1
+            FROM recibos_detalle rd2
+            WHERE rd2.id_recibo = ?
+              AND rd2.frecuencia_producto = 'Mensual'
+              AND rd2.id_producto = rd.id_producto
+              AND rd2.mes = rd.mes
+              AND rd2.anio = rd.anio
+          )
+        LIMIT 1
+        `,
+        [recibo.id_alumno, id_recibo]
+      );
 
+      if (duplicados.length > 0) {
+        throw new Error(
+          "Ya existe un recibo emitido para el mismo producto, mes y año"
+        );
+      }
 
+      // 3️⃣ Emitir recibo
+      corteId = generateCorteId(recibo);
 
-
-      // Actualizar detalles
       await conn.execute(
-        `UPDATE recibos_detalle
-         SET status_detalle = 'Emitido'
-         WHERE id_recibo = ?`,
+        `
+        UPDATE recibos
+        SET
+          status_recibo = 'Emitido',
+          encorte = ?,
+          fecha_emision = NOW(),
+          enimpresion = FALSE,
+          generando_pdf = TRUE
+        WHERE id_recibo = ?
+        `,
+        [corteId, id_recibo]
+      );
+
+      // 4️⃣ Emitir detalles
+      await conn.execute(
+        `
+        UPDATE recibos_detalle
+        SET status_detalle = 'Emitido'
+        WHERE id_recibo = ?
+        `,
         [id_recibo]
       );
 
-      // Actualizar cargos del alumno (solo los que corresponden a detalles mensuales)
+      // 5️⃣ Recalcular corte
       await conn.execute(
-        `UPDATE alumnos_cargos ac
-         JOIN recibos_detalle rd
-           ON rd.id_producto = ac.id_producto
-          AND rd.mes = ac.mes
-          AND rd.anio = ac.anio
-         SET ac.status_cargo = 'Pagado',
-             ac.id_recibo = ?
-         WHERE rd.id_recibo = ?
-           AND rd.frecuencia_producto = 'Mensual'`,
-        [id_recibo, id_recibo]
+        `CALL sp_recalcular_corte(?)`,
+        [corteId]
       );
-
-      // Recalcular corte
-      await conn.execute(`CALL sp_recalcular_corte(?)`, [corteId]);
-
-      return { recibo, corteId };
     });
 
-    // Generar y subir PDF
+    // 6️⃣ Generar PDF
     const [detalles] = await pool.execute(
       `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
       [id_recibo]
     );
 
-    const pdfBuffer = await generateReciboPDF(result.recibo, detalles);
+    const pdfBuffer = await generateReciboPDF(recibo, detalles);
     const pdfPath = getReciboPdfPath(nombre_recibo);
-    
+
     await deleteFileIfExists(pdfPath);
     const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
 
-    // Actualizar ruta del PDF
+    // 7️⃣ Guardar ruta PDF
     await pool.execute(
-      `UPDATE recibos SET ruta_pdf = ? WHERE id_recibo = ?`,
+      `
+      UPDATE recibos
+      SET
+        ruta_pdf = ?,
+        generando_pdf = FALSE
+      WHERE id_recibo = ?
+      `,
       [rutaPdf, id_recibo]
     );
 
-    res.json({ ok: true, ruta_pdf: rutaPdf });
+    res.json({
+      ok: true,
+      id_recibo,
+      encorte: corteId,
+      ruta_pdf: rutaPdf
+    });
+
   } catch (error) {
+    // Limpieza de lock técnico
+    try {
+      await pool.execute(
+        `
+        UPDATE recibos
+        SET generando_pdf = FALSE
+        WHERE id_recibo = ?
+        `,
+        [id_recibo]
+      );
+    } catch (_) {}
+
     next(error);
   }
 });
 
 // Cancelar recibo
 app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
-  try {
-    const { id_recibo, nombre_recibo } = req.body;
-    
-    if (!id_recibo || !nombre_recibo) {
-      return res.status(400).json({ 
-        ok: false, 
-        error: "id_recibo y nombre_recibo son requeridos" 
-      });
-    }
+  const { id_recibo, nombre_recibo } = req.body;
 
-    const result = await executeInTransaction(async (conn) => {
-      // 1. Obtener recibo
-      const [[recibo]] = await conn.execute(
-        `SELECT *
-         FROM recibos
-         WHERE id_recibo = ?
-           AND status_recibo = 'Emitido'
-         FOR UPDATE`,
+  if (!id_recibo || !nombre_recibo) {
+    return res.status(400).json({
+      ok: false,
+      error: "id_recibo y nombre_recibo son requeridos"
+    });
+  }
+
+  let recibo;
+
+  try {
+    // =========================
+    // TRANSACCIÓN
+    // =========================
+    await executeInTransaction(async (conn) => {
+
+      // Lock del recibo
+      const [[row]] = await conn.execute(
+        `
+        SELECT *
+        FROM recibos
+        WHERE id_recibo = ?
+          AND status_recibo = 'Emitido'
+        FOR UPDATE
+        `,
         [id_recibo]
       );
 
-      if (!recibo) {
+      if (!row) {
         throw new Error("Recibo no encontrado o no está en estado Emitido");
       }
 
-      // 2. Cancelar recibo
+      recibo = row;
+
+      // Cancelar recibo
       await conn.execute(
-        `UPDATE recibos 
-         SET status_recibo = 'Cancelado',
-             encorte = NULL,
-             fecha_cancelacion = NOW()
-         WHERE id_recibo = ?`,
+        `
+        UPDATE recibos
+        SET
+          status_recibo = 'Cancelado',
+          fecha_cancelacion = NOW()
+        WHERE id_recibo = ?
+        `,
         [id_recibo]
       );
-
-      // 3. Cancelar detalles
-      await conn.execute(
-        `UPDATE recibos_detalle 
-         SET status_detalle = 'Cancelado' 
-         WHERE id_recibo = ?`,
-        [id_recibo]
-      );
-
-      // 4. Revertir cargos
-      await conn.execute(
-        `UPDATE alumnos_cargos 
-         SET status_cargo = 'Pendiente',
-             id_recibo = NULL 
-         WHERE id_recibo = ?`,
-        [id_recibo]
-      );
-
-      // 5. Recalcular corte anterior
-      if (recibo.encorte) {
-        await conn.execute(`CALL sp_recalcular_corte(?)`, [recibo.encorte]);
-      }
-
-      return { recibo };
     });
 
-    // 6. Generar PDF cancelado (fuera de la transacción)
+    // =========================
+    // GENERAR PDF CANCELADO
+    // =========================
     const [detalles] = await pool.execute(
       `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
       [id_recibo]
     );
 
     const pdfBuffer = await generateReciboPDF(
-      result.recibo,
+      recibo,
       detalles,
       { cancelado: true }
     );
@@ -658,16 +705,27 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
     await deleteFileIfExists(pdfPath);
     const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
 
+    // Guardar ruta del PDF cancelado
     await pool.execute(
-      `UPDATE recibos SET ruta_pdf = ? WHERE id_recibo = ?`,
+      `
+      UPDATE recibos
+      SET ruta_pdf = ?
+      WHERE id_recibo = ?
+      `,
       [rutaPdf, id_recibo]
     );
 
-    res.json({ ok: true, ruta_pdf: rutaPdf });
+    res.json({
+      ok: true,
+      id_recibo,
+      ruta_pdf: rutaPdf
+    });
+
   } catch (error) {
     next(error);
   }
 });
+
 
 // Generar PDF de corte
 app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
