@@ -722,19 +722,36 @@ if (!row) {
 
       const corteId = generateCorteId(row);
 
-      await conn.execute(
-        `
-        UPDATE recibos
-        SET
-          status_recibo = 'Emitido',
-          encorte = ?,
-          fecha_emision = NOW(),
-          enimpresion = FALSE,
-          generando_pdf = TRUE
-        WHERE id_recibo = ?
-        `,
-        [corteId, id_recibo]
-      );
+      const [updateRecibo] = await conn.execute(
+  `
+  UPDATE recibos
+  SET
+    status_recibo = 'Emitido',
+    encorte = ?,
+    fecha_emision = NOW(),
+    enimpresion = FALSE,
+    generando_pdf = TRUE
+  WHERE id_recibo = ?
+  `,
+  [corteId, id_recibo]
+);
+
+if (updateRecibo.affectedRows !== 1) {
+  logger.error("ERROR CRÍTICO: No se pudo actualizar recibo al emitir", {
+    id_recibo,
+    corteId,
+    affectedRows: updateRecibo.affectedRows
+  });
+
+  throw new Error(
+    `ERROR CRÍTICO: UPDATE recibos no afectó filas (affectedRows=${updateRecibo.affectedRows})`
+  );
+}
+
+logger.info("Recibo actualizado a Emitido correctamente", {
+  id_recibo,
+  corteId
+});
 
       await conn.execute(
         `
