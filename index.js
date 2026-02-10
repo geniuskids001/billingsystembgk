@@ -2,6 +2,8 @@ const express = require("express");
 const mysql = require("mysql2/promise");
 const { Storage } = require("@google-cloud/storage");
 const PDFDocument = require("pdfkit");
+const path = require("path");
+
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -162,70 +164,169 @@ function getCortePdfPath(nombre) {
 }
 
 /* ================= PDF GENERATION ================= */
-async function generateReciboPDF(recibo, detalles, opciones = {}) {
-  const { cancelado = false } = opciones;
-  
+async function generateReciboPDF(recibo, detalles) {
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ 
-        size: "LETTER", 
-        margin: 40,
-        info: {
-          Title: `Recibo ${recibo.id_recibo}`,
-          Author: "Sistema BGK",
-        }
-      });
-      
+      const doc = new PDFDocument({ size: "LETTER", margin: 50 });
       const chunks = [];
-      doc.on("data", chunk => chunks.push(chunk));
+
+      doc.on("data", c => chunks.push(c));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // Header
-      doc.fontSize(16).text("RECIBO", { align: "center" });
-      
-      if (cancelado) {
-        doc.moveDown();
-        doc.fontSize(22).fillColor("red").text("CANCELADO", { align: "center" });
-        doc.fillColor("black");
+      const COLOR = "#00739A";
+      const GRAY = "#666666";
+      const LIGHT_GRAY = "#F8F9FA";
+      const logoPath = path.join(__dirname, "assets/businesslogo.png");
+
+      /* ================= HEADER ================= */
+      doc.image(logoPath, 50, 50, { width: 70 });
+
+      doc
+        .fillColor(COLOR)
+        .fontSize(22)
+        .font("Helvetica-Bold")
+        .text("RECIBO DE PAGO", 200, 50, { align: "right" });
+
+      doc
+        .fillColor(GRAY)
+        .fontSize(9)
+        .font("Helvetica")
+        .text(`Folio: ${recibo.id_recibo}`, 200, 80, { align: "right" })
+        .text(`Fecha: ${recibo.fecha}`, 200, 93, { align: "right" })
+        .text(`Forma de pago: ${recibo.forma_pago}`, 200, 106, { align: "right" });
+
+      doc
+        .moveTo(50, 135)
+        .lineTo(562, 135)
+        .lineWidth(1.5)
+        .stroke(COLOR);
+
+      /* ============ WATERMARK CANCELADO ============ */
+      if (recibo.status_recibo === "Cancelado") {
+        doc.save();
+        doc
+          .opacity(0.15)
+          .rotate(-35, { origin: [306, 400] })
+          .lineWidth(4)
+          .circle(306, 400, 200)
+          .stroke("red");
+
+        doc
+          .fontSize(60)
+          .font("Helvetica-Bold")
+          .fillColor("red")
+          .text("CANCELADO", 120, 370, {
+            align: "center",
+            width: 372
+          });
+
+        doc.restore();
+        doc.opacity(1);
       }
 
-      // Información del recibo
-      doc.moveDown();
-      doc.fontSize(10)
-        .text(`Folio: ${recibo.id_recibo}`)
-        .text(`Alumno: ${recibo.id_alumno}`)
-        .text(`Plantel: ${recibo.id_plantel}`)
-        .text(`Fecha: ${new Date(recibo.fecha).toLocaleString("es-MX", { timeZone: config.timezone })}`);
+      /* ================= ALUMNO ================= */
+      doc
+        .fillColor("#333333")
+        .fontSize(9)
+        .font("Helvetica")
+        .text("DATOS DEL ALUMNO", 50, 155);
 
-      // Detalle
-      doc.moveDown();
-      doc.fontSize(12).text("Detalle de cobro", { underline: true });
-      doc.moveDown(0.5);
+      doc
+        .fontSize(11)
+        .font("Helvetica-Bold")
+        .text(`${recibo.id_alumno}`, 50, 170);
 
-      let subtotal = 0;
-      detalles.forEach(detalle => {
-        const precio = Number(detalle.precio_final);
-        subtotal += precio;
-        
-        doc.fontSize(10).text(
-          `${detalle.id_producto.padEnd(30)} $${precio.toFixed(2)}`
-        );
+      /* ================= CONCEPTOS ================= */
+      doc
+        .fillColor("#333333")
+        .fontSize(9)
+        .font("Helvetica")
+        .text("CONCEPTOS", 50, 210);
+
+      const tableTop = 230;
+
+      doc.rect(50, tableTop, 512, 25).fill(LIGHT_GRAY);
+
+      doc
+        .fillColor(COLOR)
+        .fontSize(9)
+        .font("Helvetica-Bold")
+        .text("CONCEPTO", 60, tableTop + 8)
+        .text("IMPORTE", 450, tableTop + 8, { align: "right", width: 102 });
+
+      let y = tableTop + 35;
+      doc.fontSize(10).font("Helvetica");
+
+      detalles.forEach((d, index) => {
+        if (index % 2 === 0) {
+          doc.rect(50, y - 5, 512, 20).fill("#FAFBFC");
+        }
+
+        doc
+          .fillColor("#333333")
+          .text(`${d.id_producto}`, 60, y, { width: 360 })
+          .text(`$${Number(d.precio_final).toFixed(2)}`, 450, y, {
+            align: "right",
+            width: 102
+          });
+
+        y += 20;
       });
 
-      // Total
-      doc.moveDown();
-      doc.fontSize(12).text(
-        `TOTAL: $${Number(recibo.total_recibo).toFixed(2)}`,
-        { align: "right", bold: true }
-      );
+      y += 10;
+      doc
+        .moveTo(50, y)
+        .lineTo(562, y)
+        .lineWidth(0.5)
+        .stroke("#CCCCCC");
+
+      /* ================= TOTAL ================= */
+      y += 25;
+
+      doc
+        .rect(350, y, 212, 55)
+        .lineWidth(2)
+        .fillAndStroke(LIGHT_GRAY, COLOR);
+
+      doc
+        .fillColor(GRAY)
+        .fontSize(10)
+        .font("Helvetica")
+        .text("TOTAL A PAGAR", 360, y + 12);
+
+      doc
+        .fillColor(COLOR)
+        .fontSize(24)
+        .font("Helvetica-Bold")
+        .text(
+          `$${Number(recibo.total_recibo).toFixed(2)}`,
+          360,
+          y + 28
+        );
+
+      /* ================= FOOTER ================= */
+      doc
+        .fillColor(GRAY)
+        .fontSize(8)
+        .font("Helvetica")
+        .text(
+          "Este documento es un comprobante de pago válido.",
+          50,
+          720,
+          { align: "center", width: 512 }
+        );
 
       doc.end();
-    } catch (error) {
-      reject(error);
+    } catch (err) {
+      reject(err);
     }
   });
 }
+
+
+
+
 
 async function generateCortePDF(corte) {
   return new Promise((resolve, reject) => {
@@ -505,7 +606,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
   try {
     await executeInTransaction(async (conn) => {
 
-      // 1️⃣ Lock del recibo
+      //  Lock del recibo
       const [[row]] = await conn.execute(
         `
         SELECT *
@@ -524,7 +625,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
 
       recibo = row;
 
-      // 2️⃣ ANTIDUPLICADO MENSUAL (CLAVE)
+      //  ANTIDUPLICADO MENSUAL (CLAVE)
       const [duplicados] = await conn.execute(
         `
         SELECT 1
@@ -555,7 +656,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         );
       }
 
-      // 3️⃣ Emitir recibo
+      //  Emitir recibo
       corteId = generateCorteId(recibo);
 
       await conn.execute(
@@ -572,7 +673,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         [corteId, id_recibo]
       );
 
-      // 4️⃣ Emitir detalles
+      //  Emitir detalles
       await conn.execute(
         `
         UPDATE recibos_detalle
@@ -582,14 +683,14 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         [id_recibo]
       );
 
-      // 5️⃣ Recalcular corte
+      //  Recalcular corte
       await conn.execute(
         `CALL sp_recalcular_corte(?)`,
         [corteId]
       );
     });
 
-    // 6️⃣ Generar PDF
+    //  Generar PDF
     const [detalles] = await pool.execute(
       `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
       [id_recibo]
@@ -601,7 +702,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
     await deleteFileIfExists(pdfPath);
     const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
 
-    // 7️⃣ Guardar ruta PDF
+    //  Guardar ruta PDF
     await pool.execute(
       `
       UPDATE recibos
