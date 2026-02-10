@@ -360,11 +360,7 @@ async function generateReciboPDF(recibo, detalles) {
           const recargo = Number(d.recargo) || 0;
           const precioFinal = Number(d.precio_final) || 0;
 
-          // Resaltar columna TOTAL con fondo suave
-          doc
-            .rect(tableLeft + 410, y - 5, 67, 20)
-            .fill(HIGHLIGHT_BG);
-
+   
           doc
             .fillColor("#333333")
             .text(descripcion, tableLeft + 10, y, { width: 180 })
