@@ -995,6 +995,136 @@ const reciboEmitido = rowsEmitido[0];
   }
 });
 
+// ============================================================================
+// VER PDF GENÉRICO (RECIBOS, CORTES, ETC) - URL FIRMADO
+// ============================================================================
+app.get("/pdf/:tipo/:id/ver", async (req, res, next) => {
+  const { tipo, id } = req.params;
+  const token = req.query.token;
+
+  try {
+    // ------------------------------------------------------------------------
+    // 1. Validación de entrada
+    // ------------------------------------------------------------------------
+    if (!token || token !== config.apiToken) {
+      logger.warn("Intento de acceso sin token válido", { tipo, id });
+      return res.status(401).send("Token inválido");
+    }
+
+    if (!id || id.trim().length === 0) {
+      logger.warn("ID vacío en solicitud de PDF", { tipo, id });
+      return res.status(400).send("ID inválido");
+    }
+
+    // Validación básica de formato UUID (opcional pero recomendado)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(id)) {
+      logger.warn("Formato de UUID inválido", { tipo, id });
+      return res.status(400).send("Formato de ID inválido");
+    }
+
+    logger.info("Solicitud de PDF recibida", { tipo, id });
+
+    // ------------------------------------------------------------------------
+    // 2. Resolver configuración según tipo de documento
+    // ------------------------------------------------------------------------
+    const tiposPermitidos = {
+      recibo: {
+        tabla: "recibos",
+        campo_id: "id_recibo",
+        query: `
+          SELECT ruta_pdf
+          FROM recibos
+          WHERE id_recibo = ?
+            AND status_recibo = 'Emitido'
+            AND ruta_pdf IS NOT NULL
+        `
+      },
+      corte: {
+        tabla: "cortes",
+        campo_id: "id_corte",
+        query: `
+          SELECT ruta_pdf
+          FROM cortes
+          WHERE id_corte = ?
+            AND ruta_pdf IS NOT NULL
+        `
+      }
+    };
+
+    const config_tipo = tiposPermitidos[tipo];
+    
+    if (!config_tipo) {
+      logger.warn("Tipo de documento no soportado", { tipo, id });
+      return res.status(400).send("Tipo de documento no soportado");
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. Obtener ruta del PDF desde BD
+    // ------------------------------------------------------------------------
+    const [[row]] = await pool.execute(config_tipo.query, [id]);
+
+    if (!row || !row.ruta_pdf) {
+      logger.warn("PDF no encontrado en BD", { 
+        tipo, 
+        id, 
+        tabla: config_tipo.tabla 
+      });
+      return res.status(404).send("PDF no disponible");
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. Validar formato de ruta y extraer path
+    // ------------------------------------------------------------------------
+    const rutaPdf = row.ruta_pdf;
+    const bucketPrefix = `gs://${config.gcs.bucket}/`;
+
+    if (!rutaPdf.startsWith(bucketPrefix)) {
+      logger.error("Formato de ruta_pdf inválido", { 
+        tipo, 
+        id, 
+        ruta_pdf: rutaPdf 
+      });
+      return res.status(500).send("Error en formato de archivo");
+    }
+
+    const filePath = rutaPdf.replace(bucketPrefix, "");
+
+    // ------------------------------------------------------------------------
+    // 5. Generar signed URL con expiración corta
+    // ------------------------------------------------------------------------
+    const [signedUrl] = await bucket.file(filePath).getSignedUrl({
+      version: "v4",
+      action: "read",
+      expires: Date.now() + 60 * 1000 // 60 segundos
+    });
+
+    logger.info("Signed URL generado exitosamente", {
+      tipo,
+      id,
+      tabla: config_tipo.tabla,
+      filePath,
+      expira_en_segundos: 60
+    });
+
+    // ------------------------------------------------------------------------
+    // 6. Redirigir al PDF
+    // ------------------------------------------------------------------------
+    res.redirect(signedUrl);
+
+  } catch (error) {
+    logger.error("Error al generar URL firmado", {
+      tipo,
+      id,
+      error: error.message,
+      stack: error.stack
+    });
+    next(error);
+  }
+});
+
+
+
 // Generar PDF de corte
 app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
   try {
