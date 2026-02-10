@@ -200,7 +200,11 @@ function getCortePdfPath(nombre) {
 async function generateReciboPDF(recibo, detalles) {
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ size: "LETTER", margin: 50 });
+      const doc = new PDFDocument({ 
+        size: "LETTER", 
+        margin: 50,
+        bufferPages: true
+      });
       const chunks = [];
 
       doc.on("data", c => chunks.push(c));
@@ -210,6 +214,7 @@ async function generateReciboPDF(recibo, detalles) {
       const COLOR = "#00739A";
       const GRAY = "#666666";
       const LIGHT_GRAY = "#F8F9FA";
+      const BORDER_GRAY = "#CCCCCC";
       const logoPath = path.join(__dirname, "assets/businesslogo.png");
 
       /* ================= HEADER ================= */
@@ -221,13 +226,34 @@ async function generateReciboPDF(recibo, detalles) {
         .font("Helvetica-Bold")
         .text("RECIBO DE PAGO", 200, 50, { align: "right" });
 
+      // ⚠️ DECISIÓN: Si no hay fecha_emision, es error de datos
+      // No usar fallback silencioso - mejor validar antes o lanzar error
+      if (!recibo.fecha_emision) {
+        throw new Error("Recibo sin fecha de emisión - datos inconsistentes");
+      }
+
+      const fechaEmision = new Intl.DateTimeFormat("es-MX", {
+        timeZone: "America/Mexico_City",
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric"
+      }).format(new Date(recibo.fecha_emision));
+
+      const fechaEmisionFormateada =
+        fechaEmision.charAt(0).toUpperCase() + fechaEmision.slice(1);
+
       doc
         .fillColor(GRAY)
         .fontSize(9)
         .font("Helvetica")
-        .text(`Folio: ${recibo.id_recibo}`, 200, 80, { align: "right" })
-        .text(`Fecha: ${recibo.fecha}`, 200, 93, { align: "right" })
-        .text(`Forma de pago: ${recibo.forma_pago}`, 200, 106, { align: "right" });
+        .text(`Folio: ${recibo.id_recibo || 'N/A'}`, 200, 80, { align: "right" })
+        .text(`Fecha de emisión: ${fechaEmisionFormateada}`, 200, 93, {
+          align: "right"
+        })
+        .text(`Forma de pago: ${recibo.forma_pago || 'N/A'}`, 200, 106, {
+          align: "right"
+        });
 
       doc
         .moveTo(50, 135)
@@ -265,10 +291,17 @@ async function generateReciboPDF(recibo, detalles) {
         .font("Helvetica")
         .text("DATOS DEL ALUMNO", 50, 155);
 
+      // ✅ Truncamiento manual (PDFKit no soporta ellipsis nativo)
+      const MAX_CHARS_NOMBRE = 80;
+      const nombreAlumno = recibo.alumno_nombre_completo || 'Sin nombre';
+      const nombreSeguro = nombreAlumno.length > MAX_CHARS_NOMBRE
+        ? nombreAlumno.slice(0, MAX_CHARS_NOMBRE - 3) + "..."
+        : nombreAlumno;
+
       doc
         .fontSize(11)
         .font("Helvetica-Bold")
-        .text(`${recibo.id_alumno}`, 50, 170);
+        .text(nombreSeguro, 50, 170, { width: 512 });
 
       /* ================= CONCEPTOS ================= */
       doc
@@ -286,33 +319,81 @@ async function generateReciboPDF(recibo, detalles) {
         .fontSize(9)
         .font("Helvetica-Bold")
         .text("CONCEPTO", 60, tableTop + 8)
-        .text("IMPORTE", 450, tableTop + 8, { align: "right", width: 102 });
+        .text("PRECIO", 280, tableTop + 8, { width: 60, align: "right" })
+        .text("BECA", 345, tableTop + 8, { width: 55, align: "right" })
+        .text("DESC.", 405, tableTop + 8, { width: 70, align: "right" })
+        .text("RECARGO", 480, tableTop + 8, { width: 70, align: "right" })
+        .text("TOTAL", 545, tableTop + 8, {
+          width: 60,
+          align: "right"
+        });
 
       let y = tableTop + 35;
-      doc.fontSize(10).font("Helvetica");
+      doc.fontSize(9).font("Helvetica");
 
-      detalles.forEach((d, index) => {
-        if (index % 2 === 0) {
-          doc.rect(50, y - 5, 512, 20).fill("#FAFBFC");
-        }
-
+      if (!detalles || detalles.length === 0) {
         doc
-          .fillColor("#333333")
-          .text(`${d.id_producto}`, 60, y, { width: 360 })
-          .text(`$${Number(d.precio_final).toFixed(2)}`, 450, y, {
-            align: "right",
-            width: 102
+          .fillColor(GRAY)
+          .fontSize(10)
+          .text("Sin conceptos registrados", 60, y, {
+            width: 500,
+            align: "center"
           });
+        y += 30;
+      } else {
+        // ✅ Truncamiento manual para descripciones
+        const MAX_CHARS_DESC = 40;
+        
+        detalles.forEach((d, index) => {
+          if (index % 2 === 0) {
+            doc.rect(50, y - 5, 512, 20).fill("#FAFBFC");
+          }
 
-        y += 20;
-      });
+          const descripcionRaw = d.descripcion || 'Sin descripción';
+          const descripcion = descripcionRaw.length > MAX_CHARS_DESC
+            ? descripcionRaw.slice(0, MAX_CHARS_DESC - 3) + "..."
+            : descripcionRaw;
+
+          const precioBase = Number(d.precio_base) || 0;
+          const beca = Number(d.beca) || 0;
+          const descuento = Number(d.descuento) || 0;
+          const recargo = Number(d.recargo) || 0;
+          const precioFinal = Number(d.precio_final) || 0;
+
+          doc
+            .fillColor("#333333")
+            .text(descripcion, 60, y, { width: 210 })
+            .text(`$${precioBase.toFixed(2)}`, 280, y, {
+              width: 60,
+              align: "right"
+            })
+            .text(`$${beca.toFixed(2)}`, 345, y, {
+              width: 55,
+              align: "right"
+            })
+            .text(`$${descuento.toFixed(2)}`, 405, y, {
+              width: 70,
+              align: "right"
+            })
+            .text(`$${recargo.toFixed(2)}`, 480, y, {
+              width: 70,
+              align: "right"
+            })
+            .text(`$${precioFinal.toFixed(2)}`, 545, y, {
+              width: 60,
+              align: "right"
+            });
+
+          y += 20;
+        });
+      }
 
       y += 10;
       doc
         .moveTo(50, y)
         .lineTo(562, y)
         .lineWidth(0.5)
-        .stroke("#CCCCCC");
+        .stroke(BORDER_GRAY);
 
       /* ================= TOTAL ================= */
       y += 25;
@@ -326,16 +407,22 @@ async function generateReciboPDF(recibo, detalles) {
         .fillColor(GRAY)
         .fontSize(10)
         .font("Helvetica")
-        .text("TOTAL A PAGAR", 360, y + 12);
+        .text("TOTAL PAGADO", 360, y + 12);
 
+      const totalRecibo = Number(recibo.total_recibo) || 0;
+      
       doc
         .fillColor(COLOR)
-        .fontSize(24)
+        .fontSize(22)
         .font("Helvetica-Bold")
         .text(
-          `$${Number(recibo.total_recibo).toFixed(2)}`,
+          `$${totalRecibo.toFixed(2)}`,
           360,
-          y + 28
+          y + 28,
+          {
+            width: 192,
+            align: "left"
+          }
         );
 
       /* ================= FOOTER ================= */
@@ -347,68 +434,19 @@ async function generateReciboPDF(recibo, detalles) {
           "Este documento es un comprobante de pago válido.",
           50,
           720,
-          { align: "center", width: 512 }
+          { 
+            align: "center", 
+            width: 512 
+          }
         );
 
       doc.end();
+      
     } catch (err) {
       reject(err);
     }
   });
 }
-
-async function generateCortePDF(corte) {
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ 
-        size: "LETTER", 
-        margin: 40,
-        info: {
-          Title: `Corte ${corte.id_corte}`,
-          Author: "Sistema BGK",
-        }
-      });
-      
-      const chunks = [];
-      doc.on("data", chunk => chunks.push(chunk));
-      doc.on("end", () => resolve(Buffer.concat(chunks)));
-      doc.on("error", reject);
-
-      doc.fontSize(16).text("CORTE DE CAJA", { align: "center" });
-      doc.moveDown();
-
-      doc.fontSize(10)
-        .text(`Corte: ${corte.id_corte}`)
-        .text(`Plantel: ${corte.id_plantel}`)
-        .text(`Usuario: ${corte.id_usuario}`)
-        .text(`Fecha: ${corte.fecha}`);
-
-      doc.moveDown();
-      doc.fontSize(12).text("Totales por método de pago", { underline: true });
-      doc.moveDown(0.5);
-
-      const efectivo = Number(corte.total_efectivo);
-      const tarjeta = Number(corte.total_tarjeta);
-      const transferencia = Number(corte.total_transferencia);
-      const gastos = Number(corte.gastos_efectivo);
-      const total = Number(corte.total);
-
-      doc.fontSize(10)
-        .text(`Efectivo:       $${efectivo.toFixed(2)}`)
-        .text(`Tarjeta:        $${tarjeta.toFixed(2)}`)
-        .text(`Transferencia:  $${transferencia.toFixed(2)}`)
-        .text(`Gastos efectivo: -$${gastos.toFixed(2)}`)
-        .moveDown()
-        .fontSize(12)
-        .text(`TOTAL: $${total.toFixed(2)}`, { align: "right", bold: true });
-
-      doc.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
