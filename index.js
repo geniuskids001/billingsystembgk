@@ -936,6 +936,25 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
 
     next(error);
   }
+finally {
+  try {
+    await pool.execute(
+      `
+      UPDATE recibos
+      SET enimpresion = FALSE
+      WHERE id_recibo = ?
+      `,
+      [id_recibo]
+    );
+  } catch (cleanupError) {
+    logger.error("Error limpiando enimpresion", {
+      id_recibo,
+      error: cleanupError.message
+    });
+  }
+}
+
+
 });
 
 // ============================================================================
