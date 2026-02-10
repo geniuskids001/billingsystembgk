@@ -650,21 +650,24 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
     // ========================================================================
     const txResult = await executeInTransaction(async (conn) => {
       
-      const [[row]] = await conn.execute(
-        `
-        SELECT *
-        FROM recibos
-        WHERE id_recibo = ?
-          AND status_recibo = 'Borrador'
-          AND (generando_pdf IS NULL OR generando_pdf = FALSE)
-        FOR UPDATE
-        `,
-        [id_recibo]
-      );
+     const [rows] = await conn.execute(
+  `
+  SELECT *
+  FROM recibos
+  WHERE id_recibo = ?
+    AND status_recibo = 'Borrador'
+    AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+  FOR UPDATE
+  `,
+  [id_recibo]
+);
 
-      if (!row) {
-        throw new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
-      }
+const row = rows[0];
+
+if (!row) {
+  throw new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
+}
+
 
       if (!row.id_alumno || !row.id_plantel || !row.fecha) {
         throw new Error("Recibo con datos incompletos (alumno, plantel o fecha faltante)");
@@ -763,16 +766,19 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
     // ========================================================================
     // FASE 2: VERIFICACIÓN POST-COMMIT
     // ========================================================================
-    const [[reciboEmitido]] = await pool.execute(
-      `
-      SELECT *
-      FROM recibos
-      WHERE id_recibo = ?
-        AND status_recibo = 'Emitido'
-        AND encorte = ?
-      `,
-      [txResult.id_recibo, txResult.corteId]
-    );
+  const [rowsEmitido] = await pool.execute(
+  `
+  SELECT *
+  FROM recibos
+  WHERE id_recibo = ?
+    AND status_recibo = 'Emitido'
+    AND encorte = ?
+  `,
+  [txResult.id_recibo, txResult.corteId]
+);
+
+const reciboEmitido = rowsEmitido[0];
+
 
     if (!reciboEmitido) {
       throw new Error(
