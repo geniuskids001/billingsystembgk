@@ -753,6 +753,26 @@ logger.info("Recibo actualizado a Emitido correctamente", {
   corteId
 });
 
+
+const [debugRows] = await conn.execute(
+  `
+  SELECT
+    status_recibo,
+    fecha_emision,
+    encorte,
+    generando_pdf
+  FROM recibos
+  WHERE id_recibo = ?
+  `,
+  [id_recibo]
+);
+
+logger.error("DEBUG POST-UPDATE RECIBO (MISMA TX)", {
+  id_recibo,
+  row: debugRows[0]
+});
+
+
       await conn.execute(
         `
         UPDATE recibos_detalle
