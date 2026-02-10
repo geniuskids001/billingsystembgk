@@ -638,13 +638,18 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
 
   logger.info("Iniciando emisión de recibo", { id_recibo, nombre_recibo });
 
+  // ============================================================================
+  // VARIABLES DE RESULTADO (un solo punto de salida)
+  // ============================================================================
+  let resultado = null;
+  let errorFinal = null;
+
   try {
     // ========================================================================
-    // FASE 1: TRANSACCIÓN - Cambios críticos en BD
+    // FASE 1: TRANSACCIÓN
     // ========================================================================
     const txResult = await executeInTransaction(async (conn) => {
       
-      // 1. Lock del recibo
       const [[row]] = await conn.execute(
         `
         SELECT *
@@ -661,7 +666,6 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         throw new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
       }
 
-      // Validación de datos críticos
       if (!row.id_alumno || !row.id_plantel || !row.fecha) {
         throw new Error("Recibo con datos incompletos (alumno, plantel o fecha faltante)");
       }
@@ -670,7 +674,6 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         throw new Error("El recibo debe tener un total igual o mayor a cero");
       }
 
-      // 2. Validar que existan detalles
       const [[detallesCount]] = await conn.execute(
         `
         SELECT COUNT(*) as total
@@ -685,7 +688,6 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         throw new Error("El recibo no tiene detalles válidos para emitir");
       }
 
-      // 3. ANTIDUPLICADO MENSUAL
       const [duplicados] = await conn.execute(
         `
         SELECT 1
@@ -715,10 +717,8 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         );
       }
 
-      // 4. Generar ID de corte
       const corteId = generateCorteId(row);
 
-      // 5. Emitir recibo (marcar generando_pdf para evitar concurrencia)
       await conn.execute(
         `
         UPDATE recibos
@@ -733,7 +733,6 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         [corteId, id_recibo]
       );
 
-      // 6. Emitir detalles
       await conn.execute(
         `
         UPDATE recibos_detalle
@@ -743,7 +742,6 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         [id_recibo]
       );
 
-      // 7. Recalcular corte
       await conn.execute(
         `CALL sp_recalcular_corte(?)`,
         [corteId]
@@ -762,10 +760,8 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
       };
     });
 
-    // COMMIT exitoso - txResult contiene datos confirmados
-
     // ========================================================================
-    // FASE 2: VERIFICACIÓN POST-COMMIT (BD es fuente de verdad)
+    // FASE 2: VERIFICACIÓN POST-COMMIT
     // ========================================================================
     const [[reciboEmitido]] = await pool.execute(
       `
@@ -787,10 +783,10 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
     logger.info("Verificación post-commit exitosa", { id_recibo });
 
     // ========================================================================
-    // FASE 3: GENERACIÓN DE PDF (con manejo robusto de errores)
+    // FASE 3: GENERACIÓN DE PDF
     // ========================================================================
-    let pdfBuffer;
-    let rutaPdf;
+    let rutaPdf = null;
+    let pdfWarning = null;
 
     try {
       const [detalles] = await pool.execute(
@@ -798,7 +794,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         [txResult.id_recibo]
       );
 
-      pdfBuffer = await generateReciboPDF(reciboEmitido, detalles);
+      const pdfBuffer = await generateReciboPDF(reciboEmitido, detalles);
       const pdfPath = getReciboPdfPath(nombre_recibo);
 
       await deleteFileIfExists(pdfPath);
@@ -807,13 +803,15 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
       logger.info("PDF generado y subido", { id_recibo, rutaPdf });
 
     } catch (pdfError) {
-      // PDF falló, pero recibo YA está emitido en BD
+      // PDF falló - NO hacer return, solo marcar warning
       logger.error("Error al generar PDF del recibo emitido", {
         id_recibo: txResult.id_recibo,
         error: pdfError.message,
         stack: pdfError.stack
       });
 
+      pdfWarning = "Recibo emitido pero PDF no generado. Puede regenerarse.";
+      
       // Limpiar flag pero mantener recibo emitido
       await pool.execute(
         `
@@ -823,74 +821,63 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
         `,
         [txResult.id_recibo]
       );
-
-      // Responder con advertencia pero OK (recibo SÍ se emitió)
-      const duration = Date.now() - startTime;
-      logger.warn("Recibo emitido sin PDF", { 
-        id_recibo: txResult.id_recibo,
-        duration_ms: duration 
-      });
-
-      return res.json({
-        ok: true,
-        id_recibo: txResult.id_recibo,
-        encorte: txResult.corteId,
-        ruta_pdf: null,
-        warning: "Recibo emitido pero PDF no generado. Puede regenerarse.",
-        processing_time_ms: duration,
-        timestamp: new Date().toISOString()
-      });
     }
 
     // ========================================================================
-    // FASE 4: ACTUALIZAR RUTA PDF (con verificación de estado)
+    // FASE 4: ACTUALIZAR RUTA PDF (solo si se generó)
     // ========================================================================
-    const [updateResult] = await pool.execute(
-      `
-      UPDATE recibos
-      SET
-        ruta_pdf = ?,
-        generando_pdf = FALSE
-      WHERE id_recibo = ?
-        AND status_recibo = 'Emitido'
-        AND generando_pdf = TRUE
-      `,
-      [rutaPdf, txResult.id_recibo]
-    );
-
-    if (updateResult.affectedRows === 0) {
-      logger.warn("El recibo cambió de estado durante generación de PDF", {
-        id_recibo: txResult.id_recibo
-      });
-      throw new Error(
-        "El recibo cambió de estado durante la generación del PDF"
+    if (rutaPdf) {
+      const [updateResult] = await pool.execute(
+        `
+        UPDATE recibos
+        SET
+          ruta_pdf = ?,
+          generando_pdf = FALSE
+        WHERE id_recibo = ?
+          AND status_recibo = 'Emitido'
+          AND generando_pdf = TRUE
+        `,
+        [rutaPdf, txResult.id_recibo]
       );
+
+      if (updateResult.affectedRows === 0) {
+        logger.warn("El recibo cambió de estado durante generación de PDF", {
+          id_recibo: txResult.id_recibo
+        });
+        throw new Error(
+          "El recibo cambió de estado durante la generación del PDF"
+        );
+      }
     }
 
     // ========================================================================
-    // RESPUESTA EXITOSA
+    // PREPARAR RESPUESTA EXITOSA
     // ========================================================================
     const duration = Date.now() - startTime;
     
     logger.info("Recibo emitido exitosamente", {
       id_recibo: txResult.id_recibo,
       encorte: txResult.corteId,
+      pdf_generado: !!rutaPdf,
       duration_ms: duration
     });
 
-    res.json({
+    resultado = {
       ok: true,
       id_recibo: txResult.id_recibo,
       encorte: txResult.corteId,
       ruta_pdf: rutaPdf,
       processing_time_ms: duration,
-      timestamp: new Date().toISOString()
-    });
+      timestamp: new Date().toISOString(),
+      ...(pdfWarning && { warning: pdfWarning })
+    };
 
   } catch (error) {
     // ========================================================================
-    // MANEJO DE ERRORES ESPECÍFICOS Y LIMPIEZA
+    // CAPTURAR ERROR PARA MANEJO CENTRALIZADO
     // ========================================================================
+    errorFinal = error;
+    
     const duration = Date.now() - startTime;
     const errorContext = {
       id_recibo,
@@ -934,283 +921,36 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
       logger.error("Error en emisión de recibo", errorContext);
     }
 
-    next(error);
-  }
-finally {
-  try {
-    await pool.execute(
-      `
-      UPDATE recibos
-      SET enimpresion = FALSE
-      WHERE id_recibo = ?
-      `,
-      [id_recibo]
-    );
-  } catch (cleanupError) {
-    logger.error("Error limpiando enimpresion", {
-      id_recibo,
-      error: cleanupError.message
-    });
-  }
-}
-
-
-});
-
-// ============================================================================
-// CANCELAR RECIBO - Versión transaccional robusta
-// ============================================================================
-app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
-  const { id_recibo, nombre_recibo, motivo_cancelacion } = req.body;
-  const startTime = Date.now();
-
-  if (!id_recibo || !nombre_recibo) {
-    return res.status(400).json({
-      ok: false,
-      error: "id_recibo y nombre_recibo son requeridos"
-    });
-  }
-
-  logger.info("Iniciando cancelación de recibo", { 
-    id_recibo, 
-    nombre_recibo,
-    motivo: motivo_cancelacion 
-  });
-
-  try {
+  } finally {
     // ========================================================================
-    // FASE 1: TRANSACCIÓN - Cancelación en BD
-    // ========================================================================
-    const txResult = await executeInTransaction(async (conn) => {
-      
-      // 1. Lock del recibo
-      const [[row]] = await conn.execute(
-        `
-        SELECT *
-        FROM recibos
-        WHERE id_recibo = ?
-          AND status_recibo = 'Emitido'
-        FOR UPDATE
-        `,
-        [id_recibo]
-      );
-
-      if (!row) {
-        throw new Error("Recibo no encontrado o no está en estado Emitido");
-      }
-
-      const corteId = row.encorte;
-
-      // 2. Cancelar recibo
-      await conn.execute(
-        `
-        UPDATE recibos
-        SET
-          status_recibo = 'Cancelado',
-          fecha_cancelacion = NOW(),
-          motivo_cancelacion = ?
-        WHERE id_recibo = ?
-        `,
-        [motivo_cancelacion || 'Sin motivo especificado', id_recibo]
-      );
-
-      // 3. Cancelar detalles
-      await conn.execute(
-        `
-        UPDATE recibos_detalle
-        SET status_detalle = 'Cancelado'
-        WHERE id_recibo = ?
-        `,
-        [id_recibo]
-      );
-
-      // 4. Recalcular corte (excluirá recibos cancelados)
-      if (corteId) {
-        await conn.execute(
-          `CALL sp_recalcular_corte(?)`,
-          [corteId]
-        );
-      }
-
-      logger.info("Transacción de cancelación completada", { 
-        id_recibo, 
-        corteId 
-      });
-
-      return {
-        id_recibo,
-        corteId,
-        id_alumno: row.id_alumno,
-        fecha_emision: row.fecha_emision
-      };
-    });
-
-    // COMMIT exitoso
-
-    // ========================================================================
-    // FASE 2: VERIFICACIÓN POST-COMMIT
-    // ========================================================================
-    const [[reciboCancelado]] = await pool.execute(
-      `
-      SELECT *
-      FROM recibos
-      WHERE id_recibo = ?
-        AND status_recibo = 'Cancelado'
-      `,
-      [txResult.id_recibo]
-    );
-
-    if (!reciboCancelado) {
-      throw new Error(
-        "ERROR CRÍTICO: La transacción reportó éxito pero el recibo no está en estado Cancelado"
-      );
-    }
-
-    logger.info("Verificación post-cancelación exitosa", { id_recibo });
-
-    // ========================================================================
-    // FASE 3: LIMPIEZA DE ARCHIVOS (opcional, fuera de transacción)
+    // LIMPIEZA SIEMPRE (independiente de éxito/error)
     // ========================================================================
     try {
-      const pdfPath = getReciboPdfPath(nombre_recibo);
-      await deleteFileIfExists(pdfPath);
+      await pool.execute(
+        `
+        UPDATE recibos
+        SET enimpresion = FALSE
+        WHERE id_recibo = ?
+        `,
+        [id_recibo]
+      );
     } catch (cleanupError) {
-      logger.warn("Error al eliminar PDF del recibo cancelado", {
-        id_recibo: txResult.id_recibo,
+      logger.error("Error limpiando enimpresion", {
+        id_recibo,
         error: cleanupError.message
       });
     }
+  }
 
-    // ========================================================================
-    // RESPUESTA EXITOSA
-    // ========================================================================
-    const duration = Date.now() - startTime;
-    
-    logger.info("Recibo cancelado exitosamente", {
-      id_recibo: txResult.id_recibo,
-      corte_recalculado: txResult.corteId,
-      duration_ms: duration
-    });
-
-    res.json({
-      ok: true,
-      id_recibo: txResult.id_recibo,
-      status: 'Cancelado',
-      corte_recalculado: txResult.corteId,
-      fecha_cancelacion: reciboCancelado.fecha_cancelacion,
-      processing_time_ms: duration,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    // ========================================================================
-    // MANEJO DE ERRORES
-    // ========================================================================
-    const duration = Date.now() - startTime;
-    const errorContext = {
-      id_recibo,
-      nombre_recibo,
-      timestamp: new Date().toISOString(),
-      duration_ms: duration,
-      error_message: error.message,
-      error_stack: error.stack
-    };
-
-    if (error.message.includes("no encontrado")) {
-      logger.warn("Recibo no disponible para cancelación", errorContext);
-    } else if (error.message.includes("ERROR CRÍTICO")) {
-      logger.error("INCONSISTENCIA DE ESTADO", errorContext);
-    } else {
-      logger.error("Error en cancelación de recibo", errorContext);
-    }
-
-    next(error);
+  // ============================================================================
+  // PUNTO ÚNICO DE SALIDA
+  // ============================================================================
+  if (errorFinal) {
+    next(errorFinal);
+  } else {
+    res.json(resultado);
   }
 });
-
-// ============================================================================
-// REGENERAR PDF - Endpoint de recuperación
-// ============================================================================
-app.post("/regenerar-pdf-recibo", requireToken, async (req, res, next) => {
-  const { id_recibo, nombre_recibo } = req.body;
-  const startTime = Date.now();
-
-  if (!id_recibo || !nombre_recibo) {
-    return res.status(400).json({
-      ok: false,
-      error: "id_recibo y nombre_recibo son requeridos"
-    });
-  }
-
-  logger.info("Iniciando regeneración de PDF", { id_recibo, nombre_recibo });
-
-  try {
-    // Verificar que el recibo esté emitido
-    const [[recibo]] = await pool.execute(
-      `
-      SELECT *
-      FROM recibos
-      WHERE id_recibo = ?
-        AND status_recibo = 'Emitido'
-      `,
-      [id_recibo]
-    );
-
-    if (!recibo) {
-      throw new Error("Recibo no encontrado o no está emitido");
-    }
-
-    // Generar PDF
-    const [detalles] = await pool.execute(
-      `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
-      [id_recibo]
-    );
-
-    const pdfBuffer = await generateReciboPDF(recibo, detalles);
-    const pdfPath = getReciboPdfPath(nombre_recibo);
-
-    await deleteFileIfExists(pdfPath);
-    const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
-
-    // Actualizar ruta
-    await pool.execute(
-      `
-      UPDATE recibos
-      SET ruta_pdf = ?
-      WHERE id_recibo = ?
-        AND status_recibo = 'Emitido'
-      `,
-      [rutaPdf, id_recibo]
-    );
-
-    const duration = Date.now() - startTime;
-    
-    logger.info("PDF regenerado exitosamente", { 
-      id_recibo, 
-      rutaPdf,
-      duration_ms: duration 
-    });
-
-    res.json({
-      ok: true,
-      id_recibo,
-      ruta_pdf: rutaPdf,
-      processing_time_ms: duration,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    const duration = Date.now() - startTime;
-    logger.error("Error al regenerar PDF", {
-      id_recibo,
-      nombre_recibo,
-      error: error.message,
-      duration_ms: duration
-    });
-    next(error);
-  }
-});
-
 
 // Generar PDF de corte
 app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
