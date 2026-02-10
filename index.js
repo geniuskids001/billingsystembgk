@@ -215,6 +215,7 @@ async function generateReciboPDF(recibo, detalles) {
       const GRAY = "#666666";
       const LIGHT_GRAY = "#F8F9FA";
       const BORDER_GRAY = "#CCCCCC";
+      const HIGHLIGHT_BG = "#E8F4F8"; // Color suave para resaltar total
       const logoPath = path.join(__dirname, "assets/businesslogo.png");
 
       /* ================= HEADER ================= */
@@ -226,8 +227,7 @@ async function generateReciboPDF(recibo, detalles) {
         .font("Helvetica-Bold")
         .text("RECIBO DE PAGO", 200, 50, { align: "right" });
 
-      // ⚠️ DECISIÓN: Si no hay fecha_emision, es error de datos
-      // No usar fallback silencioso - mejor validar antes o lanzar error
+      // Validación de fecha
       if (!recibo.fecha_emision) {
         throw new Error("Recibo sin fecha de emisión - datos inconsistentes");
       }
@@ -291,7 +291,6 @@ async function generateReciboPDF(recibo, detalles) {
         .font("Helvetica")
         .text("DATOS DEL ALUMNO", 50, 155);
 
-      // ✅ Truncamiento manual (PDFKit no soporta ellipsis nativo)
       const MAX_CHARS_NOMBRE = 80;
       const nombreAlumno = recibo.alumno_nombre_completo || 'Sin nombre';
       const nombreSeguro = nombreAlumno.length > MAX_CHARS_NOMBRE
@@ -303,30 +302,31 @@ async function generateReciboPDF(recibo, detalles) {
         .font("Helvetica-Bold")
         .text(nombreSeguro, 50, 170, { width: 512 });
 
-      /* ================= CONCEPTOS ================= */
+      /* ================= CONCEPTOS - TABLA CENTRADA ================= */
       doc
         .fillColor("#333333")
         .fontSize(9)
         .font("Helvetica")
         .text("CONCEPTOS", 50, 210);
 
+      // Tabla centrada: empieza en 85 en lugar de 50 (35px de margen extra)
+      const tableLeft = 85;
+      const tableWidth = 477; // Ancho reducido para centrar
       const tableTop = 230;
 
-      doc.rect(50, tableTop, 512, 25).fill(LIGHT_GRAY);
+      // Header de tabla
+      doc.rect(tableLeft, tableTop, tableWidth, 25).fill(LIGHT_GRAY);
 
       doc
         .fillColor(COLOR)
         .fontSize(9)
         .font("Helvetica-Bold")
-        .text("CONCEPTO", 60, tableTop + 8)
-        .text("PRECIO", 280, tableTop + 8, { width: 60, align: "right" })
-        .text("BECA", 345, tableTop + 8, { width: 55, align: "right" })
-        .text("DESC.", 405, tableTop + 8, { width: 70, align: "right" })
-        .text("RECARGO", 480, tableTop + 8, { width: 70, align: "right" })
-        .text("TOTAL", 545, tableTop + 8, {
-          width: 60,
-          align: "right"
-        });
+        .text("CONCEPTO", tableLeft + 10, tableTop + 8, { width: 180 })
+        .text("PRECIO", tableLeft + 195, tableTop + 8, { width: 50, align: "right" })
+        .text("BECA", tableLeft + 250, tableTop + 8, { width: 45, align: "right" })
+        .text("DESC.", tableLeft + 300, tableTop + 8, { width: 50, align: "right" })
+        .text("RECARGO", tableLeft + 355, tableTop + 8, { width: 55, align: "right" })
+        .text("TOTAL", tableLeft + 415, tableTop + 8, { width: 52, align: "right" });
 
       let y = tableTop + 35;
       doc.fontSize(9).font("Helvetica");
@@ -335,18 +335,18 @@ async function generateReciboPDF(recibo, detalles) {
         doc
           .fillColor(GRAY)
           .fontSize(10)
-          .text("Sin conceptos registrados", 60, y, {
-            width: 500,
+          .text("Sin conceptos registrados", tableLeft, y, {
+            width: tableWidth,
             align: "center"
           });
         y += 30;
       } else {
-        // ✅ Truncamiento manual para descripciones
-        const MAX_CHARS_DESC = 40;
+        const MAX_CHARS_DESC = 35;
         
         detalles.forEach((d, index) => {
+          // Fondo zebra
           if (index % 2 === 0) {
-            doc.rect(50, y - 5, 512, 20).fill("#FAFBFC");
+            doc.rect(tableLeft, y - 5, tableWidth, 20).fill("#FAFBFC");
           }
 
           const descripcionRaw = d.descripcion || 'Sin descripción';
@@ -360,46 +360,63 @@ async function generateReciboPDF(recibo, detalles) {
           const recargo = Number(d.recargo) || 0;
           const precioFinal = Number(d.precio_final) || 0;
 
+          // Resaltar columna TOTAL con fondo suave
+          doc
+            .rect(tableLeft + 410, y - 5, 67, 20)
+            .fill(HIGHLIGHT_BG);
+
           doc
             .fillColor("#333333")
-            .text(descripcion, 60, y, { width: 210 })
-            .text(`$${precioBase.toFixed(2)}`, 280, y, {
-              width: 60,
+            .text(descripcion, tableLeft + 10, y, { width: 180 })
+            .text(`$${precioBase.toFixed(2)}`, tableLeft + 195, y, {
+              width: 50,
               align: "right"
             })
-            .text(`$${beca.toFixed(2)}`, 345, y, {
+            .text(`$${beca.toFixed(2)}`, tableLeft + 250, y, {
+              width: 45,
+              align: "right"
+            })
+            .text(`$${descuento.toFixed(2)}`, tableLeft + 300, y, {
+              width: 50,
+              align: "right"
+            })
+            .text(`$${recargo.toFixed(2)}`, tableLeft + 355, y, {
               width: 55,
               align: "right"
-            })
-            .text(`$${descuento.toFixed(2)}`, 405, y, {
-              width: 70,
-              align: "right"
-            })
-            .text(`$${recargo.toFixed(2)}`, 480, y, {
-              width: 70,
-              align: "right"
-            })
-            .text(`$${precioFinal.toFixed(2)}`, 545, y, {
-              width: 60,
+            });
+
+          // TOTAL con negrita y color
+          doc
+            .fillColor(COLOR)
+            .font("Helvetica-Bold")
+            .text(`$${precioFinal.toFixed(2)}`, tableLeft + 415, y, {
+              width: 52,
               align: "right"
             });
+
+          // Restaurar fuente para siguiente fila
+          doc.font("Helvetica").fillColor("#333333");
 
           y += 20;
         });
       }
 
+      // Línea divisoria después de conceptos
       y += 10;
       doc
-        .moveTo(50, y)
-        .lineTo(562, y)
+        .moveTo(tableLeft, y)
+        .lineTo(tableLeft + tableWidth, y)
         .lineWidth(0.5)
         .stroke(BORDER_GRAY);
 
-      /* ================= TOTAL ================= */
+      /* ================= TOTAL - ALINEADO A LA DERECHA ================= */
       y += 25;
 
+      const totalBoxWidth = 212;
+      const totalBoxLeft = 562 - totalBoxWidth; // Alineado a la derecha
+
       doc
-        .rect(350, y, 212, 55)
+        .rect(totalBoxLeft, y, totalBoxWidth, 55)
         .lineWidth(2)
         .fillAndStroke(LIGHT_GRAY, COLOR);
 
@@ -407,7 +424,7 @@ async function generateReciboPDF(recibo, detalles) {
         .fillColor(GRAY)
         .fontSize(10)
         .font("Helvetica")
-        .text("TOTAL PAGADO", 360, y + 12);
+        .text("TOTAL PAGADO", totalBoxLeft + 10, y + 12, { width: 192 });
 
       const totalRecibo = Number(recibo.total_recibo) || 0;
       
@@ -417,11 +434,11 @@ async function generateReciboPDF(recibo, detalles) {
         .font("Helvetica-Bold")
         .text(
           `$${totalRecibo.toFixed(2)}`,
-          360,
+          totalBoxLeft + 10,
           y + 28,
           {
             width: 192,
-            align: "left"
+            align: "right"
           }
         );
 
@@ -446,8 +463,7 @@ async function generateReciboPDF(recibo, detalles) {
       reject(err);
     }
   });
-}
-/* ================= BUSINESS LOGIC ================= */
+}/* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
     `SELECT * 
@@ -866,43 +882,73 @@ const reciboEmitido = rowsEmitido[0];
     // ========================================================================
     // FASE 3: GENERACIÓN DE PDF
     // ========================================================================
-    let rutaPdf = null;
-    let pdfWarning = null;
+  
+ 
+let rutaPdf = null;
+let pdfWarning = null;
 
-    try {
-      const [detalles] = await pool.execute(
-        `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
-        [txResult.id_recibo]
-      );
+try {
+  // 🔹 Rehidratar recibo con nombre completo del alumno
+  const [[reciboParaPdf]] = await pool.execute(
+    `
+    SELECT
+      r.*,
+      CONCAT_WS(' ',
+        a.apellido_paterno,
+        a.apellido_materno,
+        a.nombre
+      ) AS alumno_nombre_completo
+    FROM recibos r
+    JOIN alumnos a ON a.id_alumno = r.id_alumno
+    WHERE r.id_recibo = ?
+      AND r.status_recibo = 'Emitido'
+    `,
+    [txResult.id_recibo]
+  );
 
-      const pdfBuffer = await generateReciboPDF(reciboEmitido, detalles);
-      const pdfPath = getReciboPdfPath(nombre_recibo);
+  if (!reciboParaPdf) {
+    throw new Error("No se pudo obtener recibo emitido para PDF");
+  }
 
-      await deleteFileIfExists(pdfPath);
-      rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
+  const [detalles] = await pool.execute(
+    `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
+    [txResult.id_recibo]
+  );
 
-      logger.info("PDF generado y subido", { id_recibo, rutaPdf });
+  const pdfBuffer = await generateReciboPDF(reciboParaPdf, detalles);
+  const pdfPath = getReciboPdfPath(nombre_recibo);
 
-    } catch (pdfError) {
-      // PDF falló - NO hacer return, solo marcar warning
-      logger.error("Error al generar PDF del recibo emitido", {
-        id_recibo: txResult.id_recibo,
-        error: pdfError.message,
-        stack: pdfError.stack
-      });
+  await deleteFileIfExists(pdfPath);
+  rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
 
-      pdfWarning = "Recibo emitido pero PDF no generado. Puede regenerarse.";
-      
-      // Limpiar flag pero mantener recibo emitido
-      await pool.execute(
-        `
-        UPDATE recibos
-        SET generando_pdf = FALSE
-        WHERE id_recibo = ?
-        `,
-        [txResult.id_recibo]
-      );
-    }
+  logger.info("PDF generado y subido", { id_recibo: txResult.id_recibo, rutaPdf });
+
+} catch (pdfError) {
+  logger.error("Error al generar PDF del recibo emitido", {
+    id_recibo: txResult.id_recibo,
+    error: pdfError.message,
+    stack: pdfError.stack
+  });
+
+  pdfWarning = "Recibo emitido pero PDF no generado. Puede regenerarse.";
+
+  await pool.execute(
+    `
+    UPDATE recibos
+    SET generando_pdf = FALSE
+    WHERE id_recibo = ?
+    `,
+    [txResult.id_recibo]
+  );
+}
+
+
+
+
+
+
+
+
 
     // ========================================================================
     // FASE 4: ACTUALIZAR RUTA PDF (solo si se generó)
@@ -1252,78 +1298,71 @@ app.post("/recibos/regenerar-pdf", requireToken, async (req, res, next) => {
 
   try {
     // ============================================================
-    // FASE 1: BLOQUEO + VALIDACIÓN (TRANSACCIÓN)
-    // ============================================================
-    const lockAcquiredAt = Date.now();
+// FASE 1: BLOQUEO + VALIDACIÓN (TRANSACCIÓN)
+// ============================================================
+const lockAcquiredAt = Date.now();
 
-    await executeInTransaction(async (conn) => {
+await executeInTransaction(async (conn) => {
 
-      const [[row]] = await conn.execute(
-        `
-        SELECT *
-        FROM recibos
-        WHERE id_recibo = ?
-          AND status_recibo IN ('Emitido','Cancelado')
-          AND (generando_pdf IS NULL OR generando_pdf = FALSE)
-        FOR UPDATE
-        `,
-        [reciboIdSanitized]
-      );
+  const [[row]] = await conn.execute(
+    `
+    SELECT *
+    FROM recibos
+    WHERE id_recibo = ?
+      AND status_recibo IN ('Emitido','Cancelado')
+      AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+    FOR UPDATE
+    `,
+    [reciboIdSanitized]
+  );
 
-      if (!row) {
-        throw new Error(
-          "Recibo no encontrado, no válido para regeneración o está siendo procesado"
-        );
-      }
+  if (!row) {
+    throw new Error(
+      "Recibo no encontrado, no válido para regeneración o está siendo procesado"
+    );
+  }
 
-      // Validar datos mínimos necesarios para PDF
-      if (!row.id_alumno || !row.fecha_emision) {
-        throw new Error(
-          "Recibo con datos incompletos - no se puede generar PDF"
-        );
-      }
+  // Activar lock técnico
+  const [lockResult] = await conn.execute(
+    `
+    UPDATE recibos
+    SET generando_pdf = TRUE
+    WHERE id_recibo = ?
+    `,
+    [reciboIdSanitized]
+  );
 
-      // Activar lock técnico
-      const [lockResult] = await conn.execute(
-        `
-        UPDATE recibos
-        SET generando_pdf = TRUE
-        WHERE id_recibo = ?
-        `,
-        [reciboIdSanitized]
-      );
+  if (lockResult.affectedRows !== 1) {
+    throw new Error("No se pudo activar lock de generación de PDF");
+  }
 
-      if (lockResult.affectedRows !== 1) {
-        throw new Error("No se pudo activar lock de generación de PDF");
-      }
+  // Verificar estado post-lock
+  const [[verificacion]] = await conn.execute(
+    `
+    SELECT generando_pdf
+    FROM recibos
+    WHERE id_recibo = ?
+    `,
+    [reciboIdSanitized]
+  );
 
-      // Verificar estado post-lock
-      const [[verificacion]] = await conn.execute(
-        `
-        SELECT generando_pdf
-        FROM recibos
-        WHERE id_recibo = ?
-        `,
-        [reciboIdSanitized]
-      );
+  if (!verificacion || verificacion.generando_pdf !== 1) {
+    throw new Error(
+      "Lock no se activó correctamente en BD"
+    );
+  }
 
-      if (!verificacion || verificacion.generando_pdf !== 1) {
-        throw new Error(
-          "Lock no se activó correctamente en BD"
-        );
-      }
+  recibo = row; // Ya no se usa para PDF, solo para rutaPdf
 
-      recibo = row;
+  const lockDuration = Date.now() - lockAcquiredAt;
 
-      const lockDuration = Date.now() - lockAcquiredAt;
-
-      logger.info("Lock técnico activado para regeneración de PDF", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
-        status_recibo: recibo.status_recibo,
-        lock_duration_ms: lockDuration
-      });
-    });
+  logger.info("Lock técnico activado para regeneración de PDF", {
+    correlation_id: correlationId,
+    id_recibo: reciboIdSanitized,
+    status_recibo: recibo.status_recibo,
+    lock_duration_ms: lockDuration
+  });
+});
 
     // ============================================================
     // FASE 2: RESOLVER RUTA DEL PDF
@@ -1368,42 +1407,75 @@ app.post("/recibos/regenerar-pdf", requireToken, async (req, res, next) => {
       });
     }
 
-    // ============================================================
-    // FASE 3: GENERAR PDF
-    // ============================================================
-    const [detalles] = await pool.execute(
-      `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
-      [reciboIdSanitized]
-    );
+  // ============================================================
+// FASE 3: GENERAR PDF
+// ============================================================
 
-    // Validar que existan detalles
-    if (!detalles || detalles.length === 0) {
-      throw new Error(
-        "Recibo sin detalles - no se puede generar PDF"
-      );
-    }
+// 🔹 Rehidratar recibo con nombre completo del alumno
+const [[reciboParaPdf]] = await pool.execute(
+  `
+  SELECT
+    r.*,
+    CONCAT_WS(' ',
+      a.apellido_paterno,
+      a.apellido_materno,
+      a.nombre
+    ) AS alumno_nombre_completo
+  FROM recibos r
+  JOIN alumnos a ON a.id_alumno = r.id_alumno
+  WHERE r.id_recibo = ?
+    AND r.status_recibo IN ('Emitido', 'Cancelado')
+  `,
+  [reciboIdSanitized]
+);
 
-    logger.info("Iniciando generación de PDF", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      num_detalles: detalles.length,
-      status_recibo: recibo.status_recibo
-    });
+if (!reciboParaPdf) {
+  throw new Error(
+    "No se pudo obtener recibo con datos de alumno para PDF"
+  );
+}
 
-    pdfBuffer = await generateReciboPDF(recibo, detalles);
+// Validar datos mínimos necesarios para PDF
+if (!reciboParaPdf.id_alumno || !reciboParaPdf.fecha_emision) {
+  throw new Error(
+    "Recibo con datos incompletos - no se puede generar PDF"
+  );
+}
 
-    // Validar que el PDF se generó correctamente
-    if (!pdfBuffer || pdfBuffer.length === 0) {
-      throw new Error(
-        "PDF generado está vacío - operación abortada"
-      );
-    }
+const [detalles] = await pool.execute(
+  `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
+  [reciboIdSanitized]
+);
 
-    logger.info("PDF generado en memoria", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      buffer_size_kb: (pdfBuffer.length / 1024).toFixed(2)
-    });
+// Validar que existan detalles
+if (!detalles || detalles.length === 0) {
+  throw new Error(
+    "Recibo sin detalles - no se puede generar PDF"
+  );
+}
+
+logger.info("Iniciando generación de PDF", {
+  correlation_id: correlationId,
+  id_recibo: reciboIdSanitized,
+  num_detalles: detalles.length,
+  status_recibo: reciboParaPdf.status_recibo,
+  alumno: reciboParaPdf.alumno_nombre_completo
+});
+
+pdfBuffer = await generateReciboPDF(reciboParaPdf, detalles);
+
+// Validar que el PDF se generó correctamente
+if (!pdfBuffer || pdfBuffer.length === 0) {
+  throw new Error(
+    "PDF generado está vacío - operación abortada"
+  );
+}
+
+logger.info("PDF generado en memoria", {
+  correlation_id: correlationId,
+  id_recibo: reciboIdSanitized,
+  buffer_size_kb: (pdfBuffer.length / 1024).toFixed(2)
+});
 
     // ============================================================
     // FASE 4: SOBRESCRIBIR ARCHIVO EN GCS
