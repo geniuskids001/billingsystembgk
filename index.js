@@ -1065,6 +1065,7 @@ try {
     }
   }
 
+
   // ============================================================================
   // PUNTO ÚNICO DE SALIDA
   // ============================================================================
@@ -1074,6 +1075,172 @@ try {
     res.json(resultado);
   }
 });
+
+ // ============================================================================
+  // ENDPOINT: CANCELAR RECIBO
+  // ============================================================================
+
+app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
+  const startTime = Date.now();
+  const { id_recibo } = req.body;
+
+  if (!id_recibo) {
+    return res.status(400).json({
+      ok: false,
+      error: "id_recibo es requerido"
+    });
+  }
+
+  let reciboSnapshot = null;
+  let rutaPdfFinal = null;
+
+  try {
+    // ============================================================
+    // FASE 1: TRANSACCIÓN (VALIDAR + CANCELAR + RECALCULAR CORTE)
+    // ============================================================
+    await executeInTransaction(async (conn) => {
+
+      const [[recibo]] = await conn.execute(
+        `
+        SELECT *
+        FROM recibos
+        WHERE id_recibo = ?
+          AND solicita_cancelacion = TRUE
+          AND status_recibo = 'Emitido'
+          AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+        FOR UPDATE
+        `,
+        [id_recibo]
+      );
+
+      if (!recibo) {
+        throw new Error("Recibo no válido para cancelación");
+      }
+
+      reciboSnapshot = recibo;
+
+      // Cancelar recibo + activar lock técnico
+      await conn.execute(
+        `
+        UPDATE recibos
+        SET
+          status_recibo = 'Cancelado',
+          fecha_cancelacion = NOW(),
+          solicita_cancelacion = FALSE,
+          generando_pdf = TRUE
+        WHERE id_recibo = ?
+        `,
+        [id_recibo]
+      );
+
+      // Recalcular corte SOLO si el recibo estaba en uno
+      if (recibo.encorte) {
+        await conn.execute(
+          `CALL sp_recalcular_corte(?)`,
+          [recibo.encorte]
+        );
+      }
+    });
+
+    // ============================================================
+    // FASE 2: REGENERAR PDF (CANCELADO)
+    // ============================================================
+    const [[reciboParaPdf]] = await pool.execute(
+      `
+      SELECT
+        r.*,
+        CONCAT_WS(' ',
+          a.apellido_paterno,
+          a.apellido_materno,
+          a.nombre
+        ) AS alumno_nombre_completo
+      FROM recibos r
+      JOIN alumnos a ON a.id_alumno = r.id_alumno
+      WHERE r.id_recibo = ?
+        AND r.status_recibo = 'Cancelado'
+      `,
+      [id_recibo]
+    );
+
+    if (!reciboParaPdf) {
+      throw new Error("No se pudo obtener recibo cancelado para PDF");
+    }
+
+    const [detalles] = await pool.execute(
+      `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
+      [id_recibo]
+    );
+
+    if (!detalles || detalles.length === 0) {
+      throw new Error("Recibo cancelado sin detalles (inconsistencia)");
+    }
+
+    const pdfBuffer = await generateReciboPDF(reciboParaPdf, detalles);
+
+    // Resolver ruta PDF (sobrescritura)
+    if (reciboParaPdf.ruta_pdf) {
+      const prefix = `gs://${config.gcs.bucket}/`;
+      rutaPdfFinal = reciboParaPdf.ruta_pdf.startsWith(prefix)
+        ? reciboParaPdf.ruta_pdf.replace(prefix, "")
+        : `recibos/${id_recibo}.pdf`;
+    } else {
+      rutaPdfFinal = `recibos/${id_recibo}.pdf`;
+    }
+
+    await deleteFileIfExists(rutaPdfFinal);
+    const rutaGs = await uploadPdfToGCS(pdfBuffer, rutaPdfFinal);
+
+    // Guardar ruta + liberar lock
+    await pool.execute(
+      `
+      UPDATE recibos
+      SET
+        ruta_pdf = ?,
+        generando_pdf = FALSE
+      WHERE id_recibo = ?
+      `,
+      [rutaGs, id_recibo]
+    );
+
+    // ============================================================
+    // RESPUESTA EXITOSA
+    // ============================================================
+    res.json({
+      ok: true,
+      id_recibo,
+      status: "Cancelado",
+      ruta_pdf: rutaGs,
+      duration_ms: Date.now() - startTime
+    });
+
+  } catch (error) {
+    next(error);
+
+  } finally {
+    // ============================================================
+    // LIMPIEZA GARANTIZADA (FLAG + LOCK)
+    // ============================================================
+    try {
+      await pool.execute(
+        `
+        UPDATE recibos
+        SET
+          generando_pdf = FALSE,
+          solicita_cancelacion = FALSE
+        WHERE id_recibo = ?
+        `,
+        [id_recibo]
+      );
+    } catch (cleanupError) {
+      logger.error("ERROR CRÍTICO: No se pudo limpiar flags de cancelación", {
+        id_recibo,
+        error: cleanupError.message,
+        ACCION_REQUERIDA: "Revisar recibo manualmente en BD"
+      });
+    }
+  }
+});
+
 
 // ============================================================================
 // VER PDF GENÉRICO (RECIBOS, CORTES, ETC) - URL FIRMADO
