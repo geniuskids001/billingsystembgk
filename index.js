@@ -243,17 +243,21 @@ async function generateReciboPDF(recibo, detalles) {
       const fechaEmisionFormateada =
         fechaEmision.charAt(0).toUpperCase() + fechaEmision.slice(1);
 
-      doc
-        .fillColor(GRAY)
-        .fontSize(9)
-        .font("Helvetica")
-        .text(`Folio: ${recibo.id_recibo || 'N/A'}`, 200, 80, { align: "right" })
-        .text(`Fecha de emisión: ${fechaEmisionFormateada}`, 200, 93, {
-          align: "right"
-        })
-        .text(`Forma de pago: ${recibo.forma_pago || 'N/A'}`, 200, 106, {
-          align: "right"
-        });
+     doc
+  .fillColor(GRAY)
+  .fontSize(9)
+  .font("Helvetica")
+  .text(`Folio: ${recibo.id_recibo || 'N/A'}`, 200, 80, { align: "right" })
+  .text(`Fecha de emisión: ${fechaEmisionFormateada}`, 200, 93, {
+    align: "right"
+  })
+  .text(`Forma de pago: ${recibo.forma_pago || 'N/A'}`, 200, 106, {
+    align: "right"
+  })
+  .text(`Plantel: ${recibo.plantel_nombre || 'N/A'}`, 200, 119, {
+    align: "right"
+  });
+
 
       doc
         .moveTo(50, 135)
@@ -459,6 +463,8 @@ async function generateReciboPDF(recibo, detalles) {
       reject(err);
     }
   });
+
+
 }/* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
@@ -640,37 +646,108 @@ async function calculateReciboTotal(conn, reciboId) {
 
 app.post("/calcular-recibo", requireToken, async (req, res, next) => {
   const startTime = Date.now();
-  
+  const { id_recibo } = req.body;
+
+  if (!id_recibo) {
+    return res.status(400).json({
+      ok: false,
+      error: "id_recibo es requerido"
+    });
+  }
+
   try {
-    const { id_recibo } = req.body;
-    
-    if (!id_recibo) {
-      return res.status(400).json({ ok: false, error: "id_recibo es requerido" });
+    // ============================================================
+    // FASE 1: Intentar activar lock técnico (anti-concurrencia)
+    // ============================================================
+    const [updateLock] = await pool.execute(
+      `
+      UPDATE recibos
+      SET calculando = TRUE,
+          error_message = NULL
+      WHERE id_recibo = ?
+        AND (calculando IS NULL OR calculando = FALSE)
+      `,
+      [id_recibo]
+    );
+
+    if (updateLock.affectedRows === 0) {
+      return res.status(409).json({
+        ok: false,
+        error: "El recibo ya está siendo calculado"
+      });
     }
 
-    logger.info("Iniciando cálculo de recibo", { id_recibo });
+    logger.info("Lock técnico activado - iniciando cálculo", { id_recibo });
 
+    // ============================================================
+    // FASE 2: Ejecutar lógica transaccional
+    // ============================================================
     const result = await executeInTransaction(async (conn) => {
       return await calculateReciboTotal(conn, id_recibo);
     });
 
+    // ============================================================
+    // FASE 3: Éxito → limpiar flag y errores
+    // ============================================================
+    await pool.execute(
+      `
+      UPDATE recibos
+      SET calculando = FALSE,
+          error_message = NULL
+      WHERE id_recibo = ?
+      `,
+      [id_recibo]
+    );
+
     const duration = Date.now() - startTime;
-    logger.info("Recibo calculado exitosamente", { 
-      id_recibo, 
+
+    logger.info("Recibo calculado exitosamente", {
+      id_recibo,
       total: result.total,
-      duration_ms: duration 
+      duration_ms: duration
     });
 
-    res.json({ ok: true, ...result });
+    res.json({
+      ok: true,
+      ...result,
+      duration_ms: duration
+    });
+
   } catch (error) {
-    logger.error("Error al calcular recibo", {
-      id_recibo: req.body.id_recibo,
-      error: error.message,
+
+    const safeMessage = String(error.message || "Error desconocido")
+      .substring(0, 250);
+
+    logger.error("Error durante cálculo de recibo", {
+      id_recibo,
+      error: safeMessage,
       duration_ms: Date.now() - startTime
     });
+
+    // ============================================================
+    // FASE ERROR: limpiar lock + guardar mensaje
+    // ============================================================
+    try {
+      await pool.execute(
+        `
+        UPDATE recibos
+        SET calculando = FALSE,
+            error_message = ?
+        WHERE id_recibo = ?
+        `,
+        [safeMessage, id_recibo]
+      );
+    } catch (cleanupError) {
+      logger.error("ERROR CRÍTICO: No se pudo limpiar calculando", {
+        id_recibo,
+        error: cleanupError.message
+      });
+    }
+
     next(error);
   }
 });
+
 
 // ============================================================================
 // EMITIR RECIBO - Versión transaccional robusta
@@ -707,6 +784,7 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
   WHERE id_recibo = ?
     AND status_recibo = 'Borrador'
     AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+    AND (calculando IS NULL OR calculando = FALSE)
   FOR UPDATE
   `,
   [id_recibo]
@@ -884,23 +962,31 @@ let rutaPdf = null;
 let pdfWarning = null;
 
 try {
-  // 🔹 Rehidratar recibo con nombre completo del alumno
-  const [[reciboParaPdf]] = await pool.execute(
-    `
-    SELECT
-      r.*,
-      CONCAT_WS(' ',
-        a.apellido_paterno,
-        a.apellido_materno,
-        a.nombre
-      ) AS alumno_nombre_completo
-    FROM recibos r
-    JOIN alumnos a ON a.id_alumno = r.id_alumno
-    WHERE r.id_recibo = ?
-      AND r.status_recibo = 'Emitido'
-    `,
-    [txResult.id_recibo]
-  );
+ // 🔹 Rehidratar recibo con nombre completo del alumno y nombre del plantel
+const [[reciboParaPdf]] = await pool.execute(
+  `
+ SELECT
+  r.*,
+  CONCAT_WS(' ',
+    a.apellido_paterno,
+    a.apellido_materno,
+    a.nombre
+  ) AS alumno_nombre_completo,
+  p.nombre AS plantel_nombre,
+  p.razon_social,
+  p.rfc,
+  p.ubicacion
+FROM recibos r
+JOIN alumnos a 
+  ON a.id_alumno = r.id_alumno
+JOIN planteles p
+  ON p.id_plantel = r.id_plantel
+WHERE r.id_recibo = ?
+  AND r.status_recibo = 'Emitido'
+
+  `,
+  [txResult.id_recibo]
+);
 
   if (!reciboParaPdf) {
     throw new Error("No se pudo obtener recibo emitido para PDF");
@@ -1578,15 +1664,22 @@ await executeInTransaction(async (conn) => {
 const [[reciboParaPdf]] = await pool.execute(
   `
   SELECT
-    r.*,
-    CONCAT_WS(' ',
-      a.apellido_paterno,
-      a.apellido_materno,
-      a.nombre
-    ) AS alumno_nombre_completo
-  FROM recibos r
-  JOIN alumnos a ON a.id_alumno = r.id_alumno
-  WHERE r.id_recibo = ?
+  r.*,
+  CONCAT_WS(' ',
+    a.apellido_paterno,
+    a.apellido_materno,
+    a.nombre
+  ) AS alumno_nombre_completo,
+  p.nombre AS plantel_nombre,
+  p.razon_social,
+  p.rfc,
+  p.ubicacion
+FROM recibos r
+JOIN alumnos a 
+  ON a.id_alumno = r.id_alumno
+JOIN planteles p
+  ON p.id_plantel = r.id_plantel
+WHERE r.id_recibo = ?
     AND r.status_recibo IN ('Emitido', 'Cancelado')
   `,
   [reciboIdSanitized]
