@@ -218,93 +218,86 @@ async function generateReciboPDF(recibo, detalles) {
       const HIGHLIGHT_BG = "#E8F4F8"; // Color suave para resaltar total
       const logoPath = path.join(__dirname, "assets/businesslogo.png");
 
-      /* ================= HEADER ================= */
-      doc.image(logoPath, 50, 50, { width: 70 });
+  /* ================= HEADER ================= */
+doc.image(logoPath, 50, 50, { width: 70 });
 
-      doc
-        .fillColor(COLOR)
-        .fontSize(22)
-        .font("Helvetica-Bold")
-        .text("RECIBO DE PAGO", 200, 50, { align: "right" });
+doc
+  .fillColor(COLOR)
+  .fontSize(22)
+  .font("Helvetica-Bold")
+  .text("RECIBO DE PAGO", 200, 50, { align: "right" });
 
-      // Validación de fecha
-      if (!recibo.fecha_emision) {
-        throw new Error("Recibo sin fecha de emisión - datos inconsistentes");
-      }
+// Validación de fecha
+if (!recibo.fecha_emision) {
+  throw new Error("Recibo sin fecha de emisión - datos inconsistentes");
+}
 
-      const fechaEmision = new Intl.DateTimeFormat("es-MX", {
-        timeZone: "America/Mexico_City",
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric"
-      }).format(new Date(recibo.fecha_emision));
+const fechaEmision = new Intl.DateTimeFormat("es-MX", {
+  timeZone: "America/Mexico_City",
+  weekday: "long",
+  year: "numeric",
+  month: "long",
+  day: "numeric"
+}).format(new Date(recibo.fecha_emision));
 
-      const fechaEmisionFormateada =
-        fechaEmision.charAt(0).toUpperCase() + fechaEmision.slice(1);
+const fechaEmisionFormateada =
+  fechaEmision.charAt(0).toUpperCase() + fechaEmision.slice(1);
 
-     doc
+doc
   .fillColor(GRAY)
   .fontSize(9)
   .font("Helvetica")
   .text(`Folio: ${recibo.id_recibo || 'N/A'}`, 200, 80, { align: "right" })
-  .text(`Fecha de emisión: ${fechaEmisionFormateada}`, 200, 93, {
+  .text(`Forma de pago: ${recibo.forma_pago || 'N/A'}`, 200, 93, {
     align: "right"
   })
-  .text(`Forma de pago: ${recibo.forma_pago || 'N/A'}`, 200, 106, {
+  .text(`Plantel: ${recibo.plantel_nombre || 'N/A'}`, 200, 106, {
     align: "right"
-  })
-  .text(`Plantel: ${recibo.plantel_nombre || 'N/A'}`, 200, 119, {
+  });
+
+doc
+  .moveTo(50, 135)
+  .lineTo(562, 135)
+  .lineWidth(1.5)
+  .stroke(COLOR);
+
+/* ================= FECHA DESTACADA ================= */
+doc
+  .fillColor("#333333")
+  .fontSize(9)
+  .font("Helvetica")
+  .text("FECHA DE EMISIÓN", 50, 155, {
+    width: 512,
+    align: "right"
+  });
+
+doc
+  .fontSize(11)
+  .font("Helvetica-Bold")
+  .text(fechaEmisionFormateada, 50, 170, {
+    width: 512,
     align: "right"
   });
 
 
-      doc
-        .moveTo(50, 135)
-        .lineTo(562, 135)
-        .lineWidth(1.5)
-        .stroke(COLOR);
+/* ================= ALUMNO ================= */
+doc
+  .fillColor("#333333")
+  .fontSize(9)
+  .font("Helvetica")
+  .text("DATOS DEL ALUMNO", 50, 200);
 
-      /* ============ WATERMARK CANCELADO ============ */
-      if (recibo.status_recibo === "Cancelado") {
-        doc.save();
-        doc
-          .opacity(0.15)
-          .rotate(-35, { origin: [306, 400] })
-          .lineWidth(4)
-          .circle(306, 400, 200)
-          .stroke("red");
+const MAX_CHARS_NOMBRE = 80;
+const nombreAlumno = recibo.alumno_nombre_completo || 'Sin nombre';
+const nombreSeguro = nombreAlumno.length > MAX_CHARS_NOMBRE
+  ? nombreAlumno.slice(0, MAX_CHARS_NOMBRE - 3) + "..."
+  : nombreAlumno;
 
-        doc
-          .fontSize(60)
-          .font("Helvetica-Bold")
-          .fillColor("red")
-          .text("CANCELADO", 120, 370, {
-            align: "center",
-            width: 372
-          });
+doc
+  .fontSize(11)
+  .font("Helvetica-Bold")
+  .text(nombreSeguro, 50, 215, { width: 512 });
 
-        doc.restore();
-        doc.opacity(1);
-      }
-
-      /* ================= ALUMNO ================= */
-      doc
-        .fillColor("#333333")
-        .fontSize(9)
-        .font("Helvetica")
-        .text("DATOS DEL ALUMNO", 50, 155);
-
-      const MAX_CHARS_NOMBRE = 80;
-      const nombreAlumno = recibo.alumno_nombre_completo || 'Sin nombre';
-      const nombreSeguro = nombreAlumno.length > MAX_CHARS_NOMBRE
-        ? nombreAlumno.slice(0, MAX_CHARS_NOMBRE - 3) + "..."
-        : nombreAlumno;
-
-      doc
-        .fontSize(11)
-        .font("Helvetica-Bold")
-        .text(nombreSeguro, 50, 170, { width: 512 });
 
       /* ================= CONCEPTOS - TABLA CENTRADA ================= */
       doc
@@ -457,15 +450,105 @@ async function generateReciboPDF(recibo, detalles) {
           }
         );
 
-      doc.end();
-      
-    } catch (err) {
-      reject(err);
-    }
+
+/* ================= FOOTER PROFESIONAL ================= */
+const footerY = 740; // Posición fija en la parte inferior
+
+// Barra azul de fondo (siempre se dibuja)
+doc
+  .rect(0, footerY, doc.page.width, 32)
+  .fill(COLOR);
+
+// Línea decorativa superior
+doc
+  .moveTo(0, footerY)
+  .lineTo(doc.page.width, footerY)
+  .lineWidth(1)
+  .stroke("#FFFFFF");
+
+// Texto en blanco sobre la barra (solo si hay datos)
+if (recibo.razon_social || recibo.rfc || recibo.ubicacion) {
+  doc
+    .fillColor("#FFFFFF")
+    .fontSize(8)
+    .font("Helvetica");
+
+  // Razón social (izquierda)
+  if (recibo.razon_social) {
+    doc.text(
+      recibo.razon_social,
+      50,
+      footerY + 8,
+      { width: 180, align: "left" }
+    );
+  }
+
+  // RFC (centro)
+  if (recibo.rfc) {
+    doc.text(
+      `RFC: ${recibo.rfc}`,
+      230,
+      footerY + 8,
+      { width: 150, align: "center" }
+    );
+  }
+
+  // Ubicación (derecha)
+  if (recibo.ubicacion) {
+    doc.text(
+      recibo.ubicacion,
+      380,
+      footerY + 8,
+      { width: 182, align: "right" }
+    );
+  }
+}
+
+/* ============ WATERMARK PREMIUM CANCELADO ============ */
+if (recibo.status_recibo === "Cancelado") {
+  doc.save();
+
+  const centerX = doc.page.width / 2;
+  const centerY = doc.page.height / 2;
+
+  // Configuración base: rojo semi-transparente
+  doc.opacity(0.12).strokeColor("#CC0000").fillColor("#CC0000");
+
+  // Círculo exterior (sello institucional)
+  doc.lineWidth(8).circle(centerX, centerY, 230).stroke();
+
+  // Círculo interior (marco interno)
+  doc.lineWidth(3).circle(centerX, centerY, 195).stroke();
+
+  // Aplicar rotación diagonal
+  doc.rotate(-35, { origin: [centerX, centerY] });
+
+  // Texto principal: CANCELADO
+  doc.font("Helvetica-Bold").fontSize(72);
+  const canceladoWidth = doc.widthOfString("CANCELADO");
+  doc.text("CANCELADO", centerX - canceladoWidth / 2, centerY - 50, {
+    lineBreak: false
   });
 
+  // Texto institucional: BGK SISTEMA
+  doc.fontSize(20);
+  const sistemaWidth = doc.widthOfString("BGK SISTEMA");
+  doc.text("BGK SISTEMA", centerX - sistemaWidth / 2, centerY + 65, {
+    lineBreak: false
+  });
 
-}/* ================= BUSINESS LOGIC ================= */
+  // Restaurar estado del documento
+  doc.restore();
+  doc.opacity(1);
+}
+
+doc.end();
+
+} catch (err) {
+  reject(err);
+}
+
+/* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
     `SELECT * 
