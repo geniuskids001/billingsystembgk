@@ -642,6 +642,38 @@ async function calculateReciboTotal(conn, reciboId) {
   return { reciboId, total: totalRecibo };
 }
 
+// ================== HELPERS ==================
+
+async function getReciboHydrated(id_recibo, conn = pool) {
+  const [[recibo]] = await conn.execute(
+    `
+    SELECT
+      r.*,
+      CONCAT_WS(' ',
+        a.apellido_paterno,
+        a.apellido_materno,
+        a.nombre
+      ) AS alumno_nombre_completo,
+      p.nombre_plantel AS plantel_nombre,
+      p.razon_social,
+      p.rfc,
+      p.ubicacion
+    FROM recibos r
+    JOIN alumnos a 
+      ON a.id_alumno = r.id_alumno
+    JOIN planteles p
+      ON p.id_plantel = r.id_plantel
+    WHERE r.id_recibo = ?
+    `,
+    [id_recibo]
+  );
+
+  return recibo;
+}
+
+
+
+
 /* ================= ENDPOINTS ================= */
 
 app.post("/calcular-recibo", requireToken, async (req, res, next) => {
@@ -655,99 +687,107 @@ app.post("/calcular-recibo", requireToken, async (req, res, next) => {
     });
   }
 
-  try {
-    // ============================================================
-    // FASE 1: Intentar activar lock técnico (anti-concurrencia)
-    // ============================================================
-    const [updateLock] = await pool.execute(
+try {
+  // ============================================================
+  // FASE 1: Ejecutar lógica transaccional CON validación de lock
+  // ============================================================
+  const result = await executeInTransaction(async (conn) => {
+    // 1.1 Validar lock dentro de la transacción con FOR UPDATE
+    const [[reciboLock]] = await conn.execute(
       `
-      UPDATE recibos
-      SET calculando = TRUE,
-          error_message = NULL
+      SELECT calculando
+      FROM recibos
       WHERE id_recibo = ?
-        AND (calculando IS NULL OR calculando = FALSE)
+      FOR UPDATE
       `,
       [id_recibo]
     );
 
-    if (updateLock.affectedRows === 0) {
-      return res.status(409).json({
-        ok: false,
-        error: "El recibo ya está siendo calculado"
-      });
+    if (!reciboLock) {
+      const err = new Error("Recibo no encontrado");
+      err.statusCode = 404;
+      throw err;
     }
 
-    logger.info("Lock técnico activado - iniciando cálculo", { id_recibo });
+    if (reciboLock.calculando !== 1) {
+      const err = new Error("El recibo no está marcado como 'calculando'");
+      err.statusCode = 409;
+      throw err;
+    }
 
-    // ============================================================
-    // FASE 2: Ejecutar lógica transaccional
-    // ============================================================
-    const result = await executeInTransaction(async (conn) => {
-      return await calculateReciboTotal(conn, id_recibo);
-    });
+    logger.info("Lock técnico validado desde AppSheet", { id_recibo });
 
-    // ============================================================
-    // FASE 3: Éxito → limpiar flag y errores
-    // ============================================================
+    // 1.2 Ejecutar cálculo de negocio
+    return await calculateReciboTotal(conn, id_recibo);
+  });
+
+  // ============================================================
+  // FASE 2: Éxito → preparar respuesta
+  // ============================================================
+  const duration = Date.now() - startTime;
+  logger.info("Recibo calculado exitosamente", {
+    id_recibo,
+    total: result.total,
+    duration_ms: duration
+  });
+
+  res.json({
+    ok: true,
+    ...result,
+    duration_ms: duration
+  });
+
+} catch (error) {
+  // ============================================================
+  // FASE ERROR: manejar respuesta HTTP
+  // ============================================================
+  const safeMessage = String(error.message || "Error desconocido")
+    .substring(0, 250);
+  
+  logger.error("Error durante cálculo de recibo", {
+    id_recibo,
+    error: safeMessage,
+    duration_ms: Date.now() - startTime
+  });
+
+await pool.execute(
+  `
+  UPDATE recibos
+  SET error_message = 'Ocurrió un error al calcular, actualiza manualmente'
+  WHERE id_recibo = ?
+  `,
+  [id_recibo]
+);
+
+  const statusCode = error.statusCode || 500;
+  res.status(statusCode).json({
+    ok: false,
+    error: safeMessage
+  });
+
+} finally {
+  // ============================================================
+  // FASE FINALLY: limpiar lock SIEMPRE
+  // ============================================================
+  try {
     await pool.execute(
       `
       UPDATE recibos
-      SET calculando = FALSE,
-          error_message = NULL
+      SET calculando = FALSE
       WHERE id_recibo = ?
       `,
       [id_recibo]
     );
-
-    const duration = Date.now() - startTime;
-
-    logger.info("Recibo calculado exitosamente", {
+    logger.info("Flag calculando limpiado correctamente", { id_recibo });
+  } catch (cleanupError) {
+    logger.error("ERROR CRÍTICO: No se pudo limpiar calculando", {
       id_recibo,
-      total: result.total,
-      duration_ms: duration
+      error: cleanupError.message
     });
-
-    res.json({
-      ok: true,
-      ...result,
-      duration_ms: duration
-    });
-
-  } catch (error) {
-
-    const safeMessage = String(error.message || "Error desconocido")
-      .substring(0, 250);
-
-    logger.error("Error durante cálculo de recibo", {
-      id_recibo,
-      error: safeMessage,
-      duration_ms: Date.now() - startTime
-    });
-
-    // ============================================================
-    // FASE ERROR: limpiar lock + guardar mensaje
-    // ============================================================
-    try {
-      await pool.execute(
-        `
-        UPDATE recibos
-        SET calculando = FALSE,
-            error_message = ?
-        WHERE id_recibo = ?
-        `,
-        [safeMessage, id_recibo]
-      );
-    } catch (cleanupError) {
-      logger.error("ERROR CRÍTICO: No se pudo limpiar calculando", {
-        id_recibo,
-        error: cleanupError.message
-      });
-    }
-
-    next(error);
+    // No re-lanzar el error, solo registrar
   }
+}
 });
-
 
 // ============================================================================
 // EMITIR RECIBO - Versión transaccional robusta
@@ -962,35 +1002,18 @@ let rutaPdf = null;
 let pdfWarning = null;
 
 try {
- // 🔹 Rehidratar recibo con nombre completo del alumno y nombre del plantel
-const [[reciboParaPdf]] = await pool.execute(
-  `
- SELECT
-  r.*,
-  CONCAT_WS(' ',
-    a.apellido_paterno,
-    a.apellido_materno,
-    a.nombre
-  ) AS alumno_nombre_completo,
-  p.nombre AS plantel_nombre,
-  p.razon_social,
-  p.rfc,
-  p.ubicacion
-FROM recibos r
-JOIN alumnos a 
-  ON a.id_alumno = r.id_alumno
-JOIN planteles p
-  ON p.id_plantel = r.id_plantel
-WHERE r.id_recibo = ?
-  AND r.status_recibo = 'Emitido'
 
-  `,
-  [txResult.id_recibo]
-);
+  // 🔹 Obtener recibo hidratado usando helper
+  const reciboParaPdf = await getReciboHydrated(txResult.id_recibo);
+
 
   if (!reciboParaPdf) {
     throw new Error("No se pudo obtener recibo emitido para PDF");
   }
+
+if (reciboParaPdf.status_recibo !== 'Emitido') {
+  throw new Error("El recibo no está en estado Emitido");
+}
 
   const [detalles] = await pool.execute(
     `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
@@ -1231,26 +1254,15 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
     // ============================================================
     // FASE 2: REGENERAR PDF (CANCELADO)
     // ============================================================
-    const [[reciboParaPdf]] = await pool.execute(
-      `
-      SELECT
-        r.*,
-        CONCAT_WS(' ',
-          a.apellido_paterno,
-          a.apellido_materno,
-          a.nombre
-        ) AS alumno_nombre_completo
-      FROM recibos r
-      JOIN alumnos a ON a.id_alumno = r.id_alumno
-      WHERE r.id_recibo = ?
-        AND r.status_recibo = 'Cancelado'
-      `,
-      [id_recibo]
-    );
+const reciboParaPdf = await getReciboHydrated(id_recibo);
 
     if (!reciboParaPdf) {
       throw new Error("No se pudo obtener recibo cancelado para PDF");
     }
+
+if (reciboParaPdf.status_recibo !== 'Cancelado') {
+  throw new Error("El recibo no está en estado Cancelado");
+}
 
     const [detalles] = await pool.execute(
       `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
@@ -1661,35 +1673,16 @@ await executeInTransaction(async (conn) => {
 // ============================================================
 
 // 🔹 Rehidratar recibo con nombre completo del alumno
-const [[reciboParaPdf]] = await pool.execute(
-  `
-  SELECT
-  r.*,
-  CONCAT_WS(' ',
-    a.apellido_paterno,
-    a.apellido_materno,
-    a.nombre
-  ) AS alumno_nombre_completo,
-  p.nombre AS plantel_nombre,
-  p.razon_social,
-  p.rfc,
-  p.ubicacion
-FROM recibos r
-JOIN alumnos a 
-  ON a.id_alumno = r.id_alumno
-JOIN planteles p
-  ON p.id_plantel = r.id_plantel
-WHERE r.id_recibo = ?
-    AND r.status_recibo IN ('Emitido', 'Cancelado')
-  `,
-  [reciboIdSanitized]
-);
+const reciboParaPdf = await getReciboHydrated(reciboIdSanitized);
 
 if (!reciboParaPdf) {
-  throw new Error(
-    "No se pudo obtener recibo con datos de alumno para PDF"
-  );
+  throw new Error("No se pudo obtener recibo para regeneración");
 }
+
+if (!['Emitido','Cancelado'].includes(reciboParaPdf.status_recibo)) {
+  throw new Error("Estado no permitido para regeneración de PDF");
+}
+
 
 // Validar datos mínimos necesarios para PDF
 if (!reciboParaPdf.id_alumno || !reciboParaPdf.fecha_emision) {
