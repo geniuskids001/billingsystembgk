@@ -547,7 +547,8 @@ doc.end();
 } catch (err) {
   reject(err);
 }
-
+});
+} 
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
