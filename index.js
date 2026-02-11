@@ -1283,7 +1283,7 @@ app.get("/pdf/:tipo/:id/ver", async (req, res, next) => {
           SELECT ruta_pdf
           FROM recibos
           WHERE id_recibo = ?
-            AND status_recibo = 'Emitido'
+            AND status_recibo IN ('Emitido','Cancelado')
             AND ruta_pdf IS NOT NULL
         `
       },
