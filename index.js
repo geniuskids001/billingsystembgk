@@ -593,9 +593,19 @@ async function calculateReciboTotal(conn, reciboId) {
     [reciboId]
   );
   
-  if (detalles.length === 0) {
-    throw new Error("El recibo no tiene detalles");
-  }
+if (detalles.length === 0) {
+  await conn.execute(
+    `
+    UPDATE recibos
+    SET total_recibo = 0
+    WHERE id_recibo = ?
+    `,
+    [reciboId]
+  );
+
+  return { reciboId, total: 0 };
+}
+
   
   let totalRecibo = 0;
   
