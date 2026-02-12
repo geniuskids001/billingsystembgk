@@ -909,7 +909,6 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
   WHERE id_recibo = ?
     AND status_recibo = 'Borrador'
     AND (generando_pdf IS NULL OR generando_pdf = FALSE)
-    AND (calculando IS NULL OR calculando = FALSE)
   FOR UPDATE
   `,
   [id_recibo]
@@ -972,6 +971,23 @@ if (!row) {
           "Ya existe un recibo emitido para el mismo producto, mes y año"
         );
       }
+
+
+   await calculateReciboTotal(conn, id_recibo);
+
+const [[rowAfterCalc]] = await conn.execute(
+  `
+  SELECT total_recibo
+  FROM recibos
+  WHERE id_recibo = ?
+  `,
+  [id_recibo]
+);
+
+if (Number(rowAfterCalc.total_recibo) < 0) {
+  throw new Error("Total inválido después del cálculo");
+}
+
 
       const corteId = generateCorteId(row);
 
