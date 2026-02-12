@@ -761,6 +761,9 @@ async function getReciboHydrated(id_recibo, conn = pool) {
 
 /* ================= ENDPOINTS ================= */
 
+// ============================================================================
+// CALCULAR RECIBO - Versión optimizada (calculando = solo UX trigger)
+// ============================================================================
 app.post("/calcular-recibo", requireToken, async (req, res, next) => {
   const startTime = Date.now();
   const { id_recibo } = req.body;
@@ -772,110 +775,131 @@ app.post("/calcular-recibo", requireToken, async (req, res, next) => {
     });
   }
 
-try {
-  // ============================================================
-  // FASE 1: Ejecutar lógica transaccional CON validación de lock
-  // ============================================================
-  const result = await executeInTransaction(async (conn) => {
-    // 1.1 Validar lock dentro de la transacción con FOR UPDATE
-    const [[reciboLock]] = await conn.execute(
-      `
-      SELECT calculando
-      FROM recibos
-      WHERE id_recibo = ?
-      FOR UPDATE
-      `,
-      [id_recibo]
-    );
-
-    if (!reciboLock) {
-      const err = new Error("Recibo no encontrado");
-      err.statusCode = 404;
-      throw err;
-    }
-
-    if (reciboLock.calculando !== 1) {
-      const err = new Error("El recibo no está marcado como 'calculando'");
-      err.statusCode = 409;
-      throw err;
-    }
-
-    logger.info("Lock técnico validado desde AppSheet", { id_recibo });
-
-    // 1.2 Ejecutar cálculo de negocio
-    return await calculateReciboTotal(conn, id_recibo);
-  });
-
-  // ============================================================
-  // FASE 2: Éxito → preparar respuesta
-  // ============================================================
-  const duration = Date.now() - startTime;
-  logger.info("Recibo calculado exitosamente", {
-    id_recibo,
-    total: result.total,
-    duration_ms: duration
-  });
-
-  res.json({
-    ok: true,
-    ...result,
-    duration_ms: duration
-  });
-
-} catch (error) {
-  // ============================================================
-  // FASE ERROR: manejar respuesta HTTP
-  // ============================================================
-  const safeMessage = String(error.message || "Error desconocido")
-    .substring(0, 250);
-  
-  logger.error("Error durante cálculo de recibo", {
-    id_recibo,
-    error: safeMessage,
-    duration_ms: Date.now() - startTime
-  });
-
-await pool.execute(
-  `
-  UPDATE recibos
-  SET error_message = 'Ocurrió un error al calcular, actualiza manualmente'
-  WHERE id_recibo = ?
-  `,
-  [id_recibo]
-);
-
-  const statusCode = error.statusCode || 500;
-  res.status(statusCode).json({
-    ok: false,
-    error: safeMessage
-  });
-
-} finally {
-  // ============================================================
-  // FASE FINALLY: limpiar lock SIEMPRE
-  // ============================================================
   try {
-    await pool.execute(
-      `
-      UPDATE recibos
-      SET calculando = FALSE
-      WHERE id_recibo = ?
-      `,
-      [id_recibo]
-    );
-    logger.info("Flag calculando limpiado correctamente", { id_recibo });
-  } catch (cleanupError) {
-    logger.error("ERROR CRÍTICO: No se pudo limpiar calculando", {
-      id_recibo,
-      error: cleanupError.message
+    // ============================================================
+    // FASE 1: Ejecutar lógica transaccional
+    // ============================================================
+    const result = await executeInTransaction(async (conn) => {
+      
+      // 1.1 Adquirir lock exclusivo y validar SOLO estado de negocio
+      const [[reciboLock]] = await conn.execute(
+        `
+        SELECT id_recibo, status_recibo, calculando
+        FROM recibos
+        WHERE id_recibo = ?
+          AND status_recibo = 'Borrador'
+        FOR UPDATE
+        `,
+        [id_recibo]
+      );
+
+      if (!reciboLock) {
+        const err = new Error("Recibo no encontrado o no está en Borrador");
+        err.statusCode = 404;
+        throw err;
+      }
+
+      logger.info("Lock adquirido para cálculo", { 
+        id_recibo,
+        status: reciboLock.status_recibo,
+        calculando: reciboLock.calculando
+      });
+
+      // 1.2 Ejecutar cálculo de negocio (SIN for update interno)
+      const calcResult = await calculateReciboTotal(conn, id_recibo);
+
+      logger.info("Cálculo completado dentro de transacción", {
+        id_recibo,
+        total: calcResult.total
+      });
+
+      return calcResult;
     });
-    // No re-lanzar el error, solo registrar
+
+    // ============================================================
+    // FASE 2: Éxito → preparar respuesta
+    // ============================================================
+    const duration = Date.now() - startTime;
+    logger.info("Recibo calculado exitosamente", {
+      id_recibo,
+      total: result.total,
+      duration_ms: duration
+    });
+
+    res.json({
+      ok: true,
+      ...result,
+      duration_ms: duration
+    });
+
+  } catch (error) {
+    // ============================================================
+    // FASE ERROR: manejar respuesta HTTP con logging detallado
+    // ============================================================
+    const safeMessage = String(error.message || "Error desconocido")
+      .substring(0, 250);
+    
+    logger.error("Error durante cálculo de recibo", {
+      id_recibo,
+      error: safeMessage,
+      errorCode: error.code,
+      errorNumber: error.errno,
+      sqlState: error.sqlState,
+      statusCode: error.statusCode,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+      duration_ms: Date.now() - startTime
+    });
+
+    // Intentar registrar mensaje de error en BD
+    try {
+      await pool.execute(
+        `
+        UPDATE recibos
+        SET error_message = ?
+        WHERE id_recibo = ?
+        `,
+        ['Ocurrió un error al calcular, actualiza manualmente', id_recibo]
+      );
+    } catch (updateError) {
+      logger.error("No se pudo actualizar error_message en recibo", {
+        id_recibo,
+        updateError: updateError.message
+      });
+    }
+
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({
+      ok: false,
+      error: safeMessage
+    });
+
+  } finally {
+    // ============================================================
+    // FASE FINALLY: limpiar flag UX SIEMPRE
+    // ============================================================
+    try {
+      await pool.execute(
+        `
+        UPDATE recibos
+        SET calculando = FALSE
+        WHERE id_recibo = ?
+        `,
+        [id_recibo]
+      );
+      logger.info("Flag calculando limpiado (UX trigger)", { id_recibo });
+    } catch (cleanupError) {
+      logger.error("ERROR CRÍTICO: No se pudo limpiar calculando", {
+        id_recibo,
+        error: cleanupError.message,
+        errorCode: cleanupError.code
+      });
+      // No re-lanzar el error, solo registrar
+    }
   }
-}
 });
 
 // ============================================================================
-// EMITIR RECIBO - Versión transaccional robusta
+// EMITIR RECIBO - FASE 1: Solo bloque transaccional
 // ============================================================================
 app.post("/emitir-recibo", requireToken, async (req, res, next) => {
   const { id_recibo, nombre_recibo } = req.body;
@@ -898,37 +922,60 @@ app.post("/emitir-recibo", requireToken, async (req, res, next) => {
 
   try {
     // ========================================================================
-    // FASE 1: TRANSACCIÓN
+    // FASE 1: TRANSACCIÓN COMPLETA Y ROBUSTA
     // ========================================================================
     const txResult = await executeInTransaction(async (conn) => {
       
-     const [rows] = await conn.execute(
-  `
-  SELECT *
-  FROM recibos
-  WHERE id_recibo = ?
-    AND status_recibo = 'Borrador'
-    AND (generando_pdf IS NULL OR generando_pdf = FALSE)
-  FOR UPDATE
-  `,
-  [id_recibo]
-);
+      // ────────────────────────────────────────────────────────────────────
+      // 1.1 Adquirir lock exclusivo con validación de estado y flags
+      // ────────────────────────────────────────────────────────────────────
+      const [rows] = await conn.execute(
+        `
+        SELECT *
+        FROM recibos
+        WHERE id_recibo = ?
+          AND status_recibo = 'Borrador'
+          AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+        FOR UPDATE
+        `,
+        [id_recibo]
+      );
 
-const row = rows[0];
+      const row = rows[0];
 
-if (!row) {
-  throw new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
-}
+      if (!row) {
+        const err = new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
+        err.statusCode = 409;
+        throw err;
+      }
 
+      logger.info("Lock adquirido en recibo para emisión", { 
+        id_recibo,
+        status: row.status_recibo,
+        generando_pdf: row.generando_pdf,
+        total_actual: row.total_recibo
+      });
 
+      // ────────────────────────────────────────────────────────────────────
+      // 1.2 Validaciones de datos básicos obligatorios
+      // ────────────────────────────────────────────────────────────────────
       if (!row.id_alumno || !row.id_plantel || !row.fecha) {
-        throw new Error("Recibo con datos incompletos (alumno, plantel o fecha faltante)");
+        const err = new Error("Recibo con datos incompletos (alumno, plantel o fecha faltante)");
+        err.statusCode = 400;
+        throw err;
       }
 
       if (Number(row.total_recibo) < 0) {
-        throw new Error("El recibo debe tener un total igual o mayor a cero");
+        const err = new Error("El recibo debe tener un total igual o mayor a cero");
+        err.statusCode = 400;
+        throw err;
       }
 
+      logger.info("Validaciones de datos básicos completadas", { id_recibo });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.3 Validar existencia de detalles en Borrador
+      // ────────────────────────────────────────────────────────────────────
       const [[detallesCount]] = await conn.execute(
         `
         SELECT COUNT(*) as total
@@ -940,9 +987,19 @@ if (!row) {
       );
 
       if (detallesCount.total === 0) {
-        throw new Error("El recibo no tiene detalles válidos para emitir");
+        const err = new Error("El recibo no tiene detalles válidos para emitir");
+        err.statusCode = 400;
+        throw err;
       }
 
+      logger.info("Detalles validados", { 
+        id_recibo, 
+        cantidad_detalles: detallesCount.total 
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.4 Validar duplicados de productos mensuales
+      // ────────────────────────────────────────────────────────────────────
       const [duplicados] = await conn.execute(
         `
         SELECT 1
@@ -967,108 +1024,174 @@ if (!row) {
       );
 
       if (duplicados.length > 0) {
-        throw new Error(
-          "Ya existe un recibo emitido para el mismo producto, mes y año"
-        );
+        const err = new Error("Ya existe un recibo emitido para el mismo producto, mes y año");
+        err.statusCode = 409;
+        throw err;
       }
 
+      logger.info("Validación de duplicados completada", { 
+        id_recibo,
+        id_alumno: row.id_alumno
+      });
 
-   await calculateReciboTotal(conn, id_recibo);
+      // ────────────────────────────────────────────────────────────────────
+      // 1.5 Recalcular totales DENTRO de la transacción (SIN for update)
+      // ────────────────────────────────────────────────────────────────────
+      logger.info("Iniciando recálculo de totales", { id_recibo });
+      
+      await calculateReciboTotal(conn, id_recibo);
 
-const [[rowAfterCalc]] = await conn.execute(
-  `
-  SELECT total_recibo
-  FROM recibos
-  WHERE id_recibo = ?
-  `,
-  [id_recibo]
-);
+      logger.info("Recálculo de totales completado", { id_recibo });
 
-if (Number(rowAfterCalc.total_recibo) < 0) {
-  throw new Error("Total inválido después del cálculo");
-}
-
-
-      const corteId = generateCorteId(row);
-
-      const [updateRecibo] = await conn.execute(
-  `
-  UPDATE recibos
-  SET
-    status_recibo = 'Emitido',
-    encorte = ?,
-    fecha_emision = NOW(),
-    enimpresion = FALSE,
-    generando_pdf = TRUE
-  WHERE id_recibo = ?
-  `,
-  [corteId, id_recibo]
-);
-
-if (updateRecibo.affectedRows !== 1) {
-  logger.error("ERROR CRÍTICO: No se pudo actualizar recibo al emitir", {
-    id_recibo,
-    corteId,
-    affectedRows: updateRecibo.affectedRows
-  });
-
-  throw new Error(
-    `ERROR CRÍTICO: UPDATE recibos no afectó filas (affectedRows=${updateRecibo.affectedRows})`
-  );
-}
-
-logger.info("Recibo actualizado a Emitido correctamente", {
-  id_recibo,
-  corteId
-});
-
-
-const [debugRows] = await conn.execute(
-  `
-  SELECT
-    status_recibo,
-    fecha_emision,
-    encorte,
-    generando_pdf
-  FROM recibos
-  WHERE id_recibo = ?
-  `,
-  [id_recibo]
-);
-
-logger.error("DEBUG POST-UPDATE RECIBO (MISMA TX)", {
-  id_recibo,
-  row: debugRows[0]
-});
-
-
-      await conn.execute(
+      // ────────────────────────────────────────────────────────────────────
+      // 1.6 Validar total después del recálculo
+      // ────────────────────────────────────────────────────────────────────
+      const [[rowAfterCalc]] = await conn.execute(
         `
-        UPDATE recibos_detalle
-        SET status_detalle = 'Emitido'
+        SELECT total_recibo
+        FROM recibos
         WHERE id_recibo = ?
         `,
         [id_recibo]
       );
+
+      if (Number(rowAfterCalc.total_recibo) < 0) {
+        const err = new Error("Total inválido después del cálculo");
+        err.statusCode = 500;
+        throw err;
+      }
+
+      logger.info("Total validado después de recálculo", { 
+        id_recibo, 
+        total_final: rowAfterCalc.total_recibo 
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.7 Generar ID de corte
+      // ────────────────────────────────────────────────────────────────────
+      const corteId = generateCorteId(row);
+
+      logger.info("ID de corte generado", { 
+        id_recibo, 
+        corteId 
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.8 Actualizar recibo a Emitido con validación de estado
+      // ────────────────────────────────────────────────────────────────────
+      const [updateRecibo] = await conn.execute(
+        `
+        UPDATE recibos
+        SET
+          status_recibo = 'Emitido',
+          encorte = ?,
+          fecha_emision = NOW(),
+          enimpresion = FALSE,
+          generando_pdf = TRUE
+        WHERE id_recibo = ?
+          AND status_recibo = 'Borrador'
+        `,
+        [corteId, id_recibo]
+      );
+
+      if (updateRecibo.affectedRows !== 1) {
+        logger.error("ERROR CRÍTICO: UPDATE recibos no afectó la fila esperada", {
+          id_recibo,
+          corteId,
+          affectedRows: updateRecibo.affectedRows,
+          expectedRows: 1
+        });
+
+        const err = new Error(
+          `ERROR CRÍTICO: UPDATE recibos no afectó filas (affectedRows=${updateRecibo.affectedRows}). Posible cambio de estado concurrente.`
+        );
+        err.statusCode = 500;
+        throw err;
+      }
+
+      logger.info("Recibo actualizado a Emitido exitosamente", {
+        id_recibo,
+        corteId,
+        affectedRows: updateRecibo.affectedRows
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.9 Verificación post-UPDATE (debug/auditoría)
+      // ────────────────────────────────────────────────────────────────────
+      const [debugRows] = await conn.execute(
+        `
+        SELECT
+          status_recibo,
+          fecha_emision,
+          encorte,
+          generando_pdf,
+          total_recibo
+        FROM recibos
+        WHERE id_recibo = ?
+        `,
+        [id_recibo]
+      );
+
+      logger.info("DEBUG: Estado del recibo post-UPDATE (dentro de TX)", {
+        id_recibo,
+        estado_actual: debugRows[0]
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.10 Actualizar detalles a Emitido
+      // ────────────────────────────────────────────────────────────────────
+      const [updateDetalles] = await conn.execute(
+        `
+        UPDATE recibos_detalle
+        SET status_detalle = 'Emitido'
+        WHERE id_recibo = ?
+          AND status_detalle = 'Borrador'
+        `,
+        [id_recibo]
+      );
+
+      logger.info("Detalles actualizados a Emitido", { 
+        id_recibo,
+        detalles_actualizados: updateDetalles.affectedRows
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.11 Recalcular corte mediante stored procedure
+      // ────────────────────────────────────────────────────────────────────
+      logger.info("Ejecutando sp_recalcular_corte", { 
+        id_recibo, 
+        corteId 
+      });
 
       await conn.execute(
         `CALL sp_recalcular_corte(?)`,
         [corteId]
       );
 
-      logger.info("Transacción de emisión completada", { 
+      logger.info("sp_recalcular_corte ejecutado exitosamente", { 
         id_recibo, 
         corteId 
+      });
+
+      // ────────────────────────────────────────────────────────────────────
+      // 1.12 Transacción completada - retornar datos
+      // ────────────────────────────────────────────────────────────────────
+      logger.info("Transacción de emisión completada exitosamente", { 
+        id_recibo, 
+        corteId,
+        total_final: rowAfterCalc.total_recibo
       });
 
       return {
         id_recibo,
         corteId,
         id_alumno: row.id_alumno,
-        id_plantel: row.id_plantel
+        id_plantel: row.id_plantel,
+        total: rowAfterCalc.total_recibo
       };
     });
 
+    
     // ========================================================================
     // FASE 2: VERIFICACIÓN POST-COMMIT
     // ========================================================================
