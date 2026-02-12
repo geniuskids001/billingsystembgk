@@ -354,8 +354,20 @@ doc
 
           const precioBase = Number(d.precio_base) || 0;
           const beca = Number(d.beca) || 0;
-          const descuento = Number(d.descuento) || 0;
-          const recargo = Number(d.recargo) || 0;
+          const descuentoBase = Number(d.descuento) || 0;
+const recargoBase = Number(d.recargo) || 0;
+const montoAjuste = Number(d.monto_ajuste) || 0;
+
+// Mezclar ajuste SOLO para visualización
+let descuento = descuentoBase;
+let recargo = recargoBase;
+
+if (montoAjuste < 0) {
+  descuento += Math.abs(montoAjuste);
+} else if (montoAjuste > 0) {
+  recargo += montoAjuste;
+}
+
           const precioFinal = Number(d.precio_final) || 0;
 
    
