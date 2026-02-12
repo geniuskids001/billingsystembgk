@@ -285,7 +285,7 @@ doc
   .fillColor("#333333")
   .fontSize(9)
   .font("Helvetica")
-  .text("DATOS DEL ALUMNO", 50, 200);
+  .text("DATOS DEL ALUMNO", 50, 205);   // ← antes 200
 
 const MAX_CHARS_NOMBRE = 80;
 const nombreAlumno = recibo.alumno_nombre_completo || 'Sin nombre';
@@ -296,20 +296,21 @@ const nombreSeguro = nombreAlumno.length > MAX_CHARS_NOMBRE
 doc
   .fontSize(11)
   .font("Helvetica-Bold")
-  .text(nombreSeguro, 50, 215, { width: 512 });
+  .text(nombreSeguro, 50, 220, { width: 512 });   // ← antes 215
 
 
-      /* ================= CONCEPTOS - TABLA CENTRADA ================= */
-      doc
-        .fillColor("#333333")
-        .fontSize(9)
-        .font("Helvetica")
-        .text("CONCEPTOS", 50, 210);
+/* ================= CONCEPTOS - TABLA CENTRADA ================= */
+doc
+  .fillColor("#333333")
+  .fontSize(9)
+  .font("Helvetica")
+  .text("CONCEPTOS", 50, 250);   
+
 
       // Tabla centrada: empieza en 85 en lugar de 50 (35px de margen extra)
       const tableLeft = 85;
       const tableWidth = 477; // Ancho reducido para centrar
-      const tableTop = 230;
+      const tableTop = 270;
 
       // Header de tabla
       doc.rect(tableLeft, tableTop, tableWidth, 25).fill(LIGHT_GRAY);
@@ -443,7 +444,7 @@ doc
         .text(
           "Este documento es un comprobante de pago válido.",
           50,
-          720,
+          690,
           { 
             align: "center", 
             width: 512 
@@ -452,11 +453,11 @@ doc
 
 
 /* ================= FOOTER PROFESIONAL ================= */
-const footerY = 740; // Posición fija en la parte inferior
+const footerY = 750; // Posición fija en la parte inferior
 
 // Barra azul de fondo (siempre se dibuja)
 doc
-  .rect(0, footerY, doc.page.width, 32)
+  .rect(0, footerY, doc.page.width, 42)
   .fill(COLOR);
 
 // Línea decorativa superior
@@ -478,7 +479,7 @@ if (recibo.razon_social || recibo.rfc || recibo.ubicacion) {
     doc.text(
       recibo.razon_social,
       50,
-      footerY + 8,
+      footerY + 14,
       { width: 180, align: "left" }
     );
   }
@@ -488,7 +489,7 @@ if (recibo.razon_social || recibo.rfc || recibo.ubicacion) {
     doc.text(
       `RFC: ${recibo.rfc}`,
       230,
-      footerY + 8,
+      footerY + 14,
       { width: 150, align: "center" }
     );
   }
@@ -498,7 +499,7 @@ if (recibo.razon_social || recibo.rfc || recibo.ubicacion) {
     doc.text(
       recibo.ubicacion,
       380,
-      footerY + 8,
+      footerY + 14,
       { width: 182, align: "right" }
     );
   }
