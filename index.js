@@ -1475,66 +1475,116 @@ app.get("/pdf/:tipo/:id/ver", async (req, res, next) => {
 
 // Generar PDF de corte
 app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
-  try {
-    const { idcorte, nombrecorte } = req.body;
+  const { idcorte, nombrecorte } = req.body;
+  const startTime = Date.now();
 
-    if (!idcorte || !nombrecorte) {
-      return res.status(400).json({
-        ok: false,
-        error: "idcorte y nombrecorte son requeridos"
-      });
-    }
-
-    // ==========================================================
-    // FASE 1: Recalcular dentro de TX
-    // ==========================================================
-    await executeInTransaction(async (conn) => {
-
-      await conn.execute(`CALL sp_recalcular_corte(?)`, [idcorte]);
-
-      const [[exists]] = await conn.execute(
-        `SELECT id_corte FROM cortes WHERE id_corte = ? FOR UPDATE`,
-        [idcorte]
-      );
-
-      if (!exists) {
-        throw new Error("Corte no encontrado");
-      }
+  if (!idcorte || !nombrecorte) {
+    return res.status(400).json({
+      ok: false,
+      error: "idcorte y nombrecorte son requeridos"
     });
+  }
 
-    // ==========================================================
-    // FASE 2: Obtener corte hidratado (fuera de TX)
-    // ==========================================================
-    const corteHydrated = await getCorteHydrated(idcorte);
+  let corteSnapshot = null;
+  let rutaPdf = null;
 
-    if (!corteHydrated) {
-      throw new Error("No se pudo hidratar el corte");
-    }
-
-    // ==========================================================
-    // FASE 3: Generar PDF
-    // ==========================================================
-    const pdfBuffer = await generateCortePDF(corteHydrated);
-
-    const pdfPath = getCortePdfPath(nombrecorte);
-
-    await deleteFileIfExists(pdfPath);
-    const rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
-
-    // ==========================================================
-    // FASE 4: Guardar ruta
-    // ==========================================================
-    await pool.execute(
-      `UPDATE cortes SET ruta_pdf = ?, enimpresion = FALSE WHERE id_corte = ?`,
-      [rutaPdf, idcorte]
+ try {
+  // ==========================================================
+  // FASE 1: LOCK LÓGICO + VALIDACIÓN (TRANSACCIÓN)
+  // ==========================================================
+  await executeInTransaction(async (conn) => {
+    const [[corte]] = await conn.execute(
+      `SELECT *
+       FROM cortes
+       WHERE id_corte = ?
+         AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+       FOR UPDATE`,
+      [idcorte]
     );
 
-    res.json({ ok: true, ruta_pdf: rutaPdf });
+    if (!corte) {
+      throw new Error("Corte no encontrado o ya está siendo procesado");
+    }
 
-  } catch (error) {
-    next(error);
+    corteSnapshot = corte;
+
+    const [lockResult] = await conn.execute(
+      `UPDATE cortes
+       SET generando_pdf = TRUE
+       WHERE id_corte = ?
+         AND (generando_pdf IS NULL OR generando_pdf = FALSE)`,
+      [idcorte]
+    );
+
+    if (lockResult.affectedRows !== 1) {
+      throw new Error("No se pudo activar lock de generación PDF");
+    }
+
+    await conn.execute(`CALL sp_recalcular_corte(?)`, [idcorte]);
+  });
+
+  // ==========================================================
+  // FASE 2: HIDRATAR CORTE (FUERA DE TX)
+  // ==========================================================
+  const corteHydrated = await getCorteHydrated(idcorte);
+
+  if (!corteHydrated) {
+    throw new Error("No se pudo hidratar el corte");
   }
-});
+
+  // ==========================================================
+  // FASE 3: GENERAR PDF
+  // ==========================================================
+  const pdfBuffer = await generateCortePDF(corteHydrated);
+  const pdfPath = getCortePdfPath(nombrecorte);
+
+  await deleteFileIfExists(pdfPath);
+
+  rutaPdf = await uploadPdfToGCS(pdfBuffer, pdfPath);
+
+  // ==========================================================
+  // FASE 4: GUARDAR RUTA Y LIBERAR LOCK
+  // ==========================================================
+  await pool.execute(
+    `UPDATE cortes
+     SET ruta_pdf = ?
+     WHERE id_corte = ?`,
+    [rutaPdf, idcorte]
+  );
+
+  res.json({
+    ok: true,
+    ruta_pdf: rutaPdf,
+    duration_ms: Date.now() - startTime
+  });
+
+} catch (error) {
+  next(error);
+
+} finally {
+  // ==========================================================
+  // LIMPIEZA GARANTIZADA DE LOCKS
+  // ==========================================================
+  try {
+    await pool.execute(
+      `UPDATE cortes
+       SET generando_pdf = FALSE,
+           enimpresion = FALSE
+       WHERE id_corte = ?`,
+      [idcorte]
+    );
+
+    logger.info("Locks liberados correctamente en corte", { idcorte });
+
+  } catch (cleanupError) {
+    logger.error("ERROR CRÍTICO: No se pudieron limpiar locks en corte", {
+      idcorte,
+      error: cleanupError.message,
+      ACCION_REQUERIDA: "Revisar registro manualmente en BD"
+    });
+  }
+}
+
 
 
 
