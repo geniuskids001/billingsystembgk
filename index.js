@@ -1090,6 +1090,12 @@ console.log("DEBUG BEFORE generateReciboPDF", {
         [rutaPdf, txResult.id_recibo]
       );
 
+  console.log("DEBUG UPDATE RUTA_PDF EMITIR", {
+    id_recibo: txResult.id_recibo,
+    ruta_pdf: rutaPdf,
+    affectedRows: updateResult.affectedRows
+  });
+
       if (updateResult.affectedRows === 0) {
         logger.warn("El recibo cambió de estado durante generación de PDF", {
           id_recibo: txResult.id_recibo
