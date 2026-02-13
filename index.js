@@ -4,7 +4,11 @@ const { Storage } = require("@google-cloud/storage");
 const { generateReciboPDF } = require("./pdf/recibo_pago_pdf");
 const { generateCortePDF } = require("./pdf/corte_pdf"); 
 
-
+console.log("DEBUG PDF IMPORT:", {
+  generateReciboPDF_type: typeof generateReciboPDF,
+  generateCortePDF_type: typeof generateCortePDF,
+  timestamp: new Date().toISOString()
+});
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -1022,6 +1026,17 @@ if (reciboParaPdf.status_recibo !== 'Emitido') {
     `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
     [txResult.id_recibo]
   );
+
+console.log("DEBUG BEFORE generateReciboPDF", {
+  id_recibo: reciboParaPdf?.id_recibo,
+  status: reciboParaPdf?.status_recibo,
+  alumno: reciboParaPdf?.alumno_nombre_completo,
+  total: reciboParaPdf?.total_recibo,
+  detalles_count: detalles?.length,
+  generateReciboPDF_type: typeof generateReciboPDF
+});
+
+
 
   const pdfBuffer = await generateReciboPDF(reciboParaPdf, detalles);
   const pdfPath = getReciboPdfPath(nombre_recibo);

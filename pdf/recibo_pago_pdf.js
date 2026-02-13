@@ -2,6 +2,15 @@ const PDFDocument = require("pdfkit");
 const path = require("path");
 
 async function generateReciboPDF(recibo, detalles) {
+
+  console.log("ENTERED generateReciboPDF", {
+    id_recibo: recibo?.id_recibo,
+    alumno: recibo?.alumno_nombre_completo,
+    detalles_count: detalles?.length
+  });
+
+
+
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ 
