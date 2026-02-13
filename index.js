@@ -203,13 +203,13 @@ function getCortePdfPath(nombre) {
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
-    `SELECT * 
-     FROM recibos 
-     WHERE id_recibo = ? 
-       AND status_recibo = 'Borrador'
-     FOR UPDATE`,
-    [reciboId]
-  );
+  `SELECT * 
+   FROM recibos 
+   WHERE id_recibo = ? 
+     AND status_recibo = 'Borrador'`,
+  [reciboId]
+);
+
   
   if (!recibo) {
     throw new Error("Recibo no encontrado o no está en estado Borrador");
@@ -545,14 +545,32 @@ async function getReciboHydrated(id_recibo, conn = pool) {
 // ============================================================================
 app.post("/calcular-recibo", requireToken, async (req, res, next) => {
   const startTime = Date.now();
-  const { id_recibo } = req.body;
 
-  if (!id_recibo) {
-    return res.status(400).json({
-      ok: false,
-      error: "id_recibo es requerido"
-    });
-  }
+const { id_recibo: rawId } = req.body;
+
+if (!rawId) {
+  return res.status(400).json({
+    ok: false,
+    error: "id_recibo es requerido"
+  });
+}
+
+// Sanitizas UNA vez
+const id_recibo = String(rawId).trim();
+
+if (
+  id_recibo.length === 0 ||
+  id_recibo.length > 255 ||
+  id_recibo.includes("..") ||
+  id_recibo.includes("/") ||
+  id_recibo.includes("\\")
+) {
+  return res.status(400).json({
+    ok: false,
+    error: "Formato de id_recibo inválido"
+  });
+}
+
 
   try {
     // ============================================================
@@ -1365,13 +1383,20 @@ app.get("/pdf/:tipo/:id/ver", async (req, res, next) => {
     }
 
     // Validación básica de formato UUID (opcional pero recomendado)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(id)) {
-      logger.warn("Formato de UUID inválido", { tipo, id });
-      return res.status(400).send("Formato de ID inválido");
-    }
+  // Validación segura de ID (no UUID obligatorio)
+const idTrimmed = id.trim();
 
-    logger.info("Solicitud de PDF recibida", { tipo, id });
+if (
+  idTrimmed.length === 0 ||
+  idTrimmed.length > 255 ||
+  idTrimmed.includes("..") ||
+  idTrimmed.includes("/") ||
+  idTrimmed.includes("\\")
+) {
+  logger.warn("Formato de ID inválido", { tipo, id });
+  return res.status(400).send("Formato de ID inválido");
+}
+
 
     // ------------------------------------------------------------------------
     // 2. Resolver configuración según tipo de documento
@@ -1590,318 +1615,393 @@ app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
 
 
   // ------------------------------------------------------------------------
-    // X. Regenerar PDF (para reintentos)
-    // ------------------------------------------------------------------------
+   
 
-app.post("/recibos/regenerar-pdf", requireToken, async (req, res, next) => {
-  const { id_recibo } = req.body;
+// ==========================================================
+// MOTOR GENÉRICO DE REGENERACIÓN PDF - VERSIÓN ENTERPRISE
+// ==========================================================
+async function regeneratePdfEngine({
+  table,
+  idValue,
+  validStatuses = [],
+  hydrator,
+  pdfGenerator,
+  folder,
+  extraValidation
+}) {
   const startTime = Date.now();
   const correlationId = `regen-${Date.now()}`;
-
-  // ============================================================
-  // VALIDACIÓN Y SANITIZACIÓN
-  // ============================================================
-  if (!id_recibo) {
-    return res.status(400).json({
-      ok: false,
-      error: "id_recibo es requerido"
-    });
-  }
-
-  const reciboIdSanitized = String(id_recibo).trim();
-  if (!reciboIdSanitized || reciboIdSanitized.length > 255) {
-    return res.status(400).json({
-      ok: false,
-      error: "id_recibo inválido"
-    });
-  }
-
-  logger.info("Solicitud de regeneración de PDF recibida", {
-    correlation_id: correlationId,
-    id_recibo: reciboIdSanitized
-  });
-
-  let recibo = null;
+  let rowSnapshot = null;
   let rutaPdfFinal = null;
-  let pdfBuffer = null;
+
+  // ==========================================================
+  // VALIDACIÓN DEFENSIVA: Parámetros de entrada
+  // ==========================================================
+  if (typeof idValue !== "string" || idValue.trim().length === 0 || idValue.length > 255) {
+    throw new Error("ID inválido");
+  }
+
+  if (typeof hydrator !== "function") {
+    throw new Error("Hydrator inválido");
+  }
+
+  if (typeof pdfGenerator !== "function") {
+    throw new Error("pdfGenerator inválido");
+  }
+
+  const idValueSanitized = idValue.trim();
+
+  // ==========================================================
+  // WHITELIST: Configuración segura de tablas permitidas
+  // ==========================================================
+  const ALLOWED_TABLES = {
+    recibos: {
+      idField: "id_recibo",
+      statusField: "status_recibo",
+      hasStatus: true,
+      cleanupEnimpresion: false
+    },
+    cortes: {
+      idField: "id_corte",
+      statusField: null,
+      hasStatus: false,
+      cleanupEnimpresion: true
+    }
+  };
+
+  // ==========================================================
+  // VALIDACIÓN 1: Tabla permitida
+  // ==========================================================
+  const tableConfig = ALLOWED_TABLES[table];
+
+  if (!tableConfig) {
+    throw new Error(`Tabla no permitida: ${table}`);
+  }
+
+  const { idField, statusField, hasStatus, cleanupEnimpresion } = tableConfig;
+
+  // ==========================================================
+  // VALIDACIÓN 2: Folder permitido
+  // ==========================================================
+  const ALLOWED_FOLDERS = ["recibos", "cortes"];
+
+  if (!ALLOWED_FOLDERS.includes(folder)) {
+    throw new Error(`Folder no permitido: ${folder}`);
+  }
+
+  // ==========================================================
+  // VALIDACIÓN 3: Estado requerido si tabla lo tiene
+  // ==========================================================
+  if (hasStatus && (!Array.isArray(validStatuses) || validStatuses.length === 0)) {
+    throw new Error(`validStatuses requerido para tabla ${table}`);
+  }
 
   try {
-    // ============================================================
-// FASE 1: BLOQUEO + VALIDACIÓN (TRANSACCIÓN)
-// ============================================================
-const lockAcquiredAt = Date.now();
-
-await executeInTransaction(async (conn) => {
-
-  const [[row]] = await conn.execute(
-    `
-    SELECT *
-    FROM recibos
-    WHERE id_recibo = ?
-      AND status_recibo IN ('Emitido','Cancelado')
-      AND (generando_pdf IS NULL OR generando_pdf = FALSE)
-    FOR UPDATE
-    `,
-    [reciboIdSanitized]
-  );
-
-  if (!row) {
-    throw new Error(
-      "Recibo no encontrado, no válido para regeneración o está siendo procesado"
-    );
-  }
-
-  // Activar lock técnico
-  const [lockResult] = await conn.execute(
-    `
-    UPDATE recibos
-    SET generando_pdf = TRUE
-    WHERE id_recibo = ?
-    `,
-    [reciboIdSanitized]
-  );
-
-  if (lockResult.affectedRows !== 1) {
-    throw new Error("No se pudo activar lock de generación de PDF");
-  }
-
-  // Verificar estado post-lock
-  const [[verificacion]] = await conn.execute(
-    `
-    SELECT generando_pdf
-    FROM recibos
-    WHERE id_recibo = ?
-    `,
-    [reciboIdSanitized]
-  );
-
-  if (!verificacion || verificacion.generando_pdf !== 1) {
-    throw new Error(
-      "Lock no se activó correctamente en BD"
-    );
-  }
-
-  recibo = row; // Ya no se usa para PDF, solo para rutaPdf
-
-  const lockDuration = Date.now() - lockAcquiredAt;
-
-  logger.info("Lock técnico activado para regeneración de PDF", {
-    correlation_id: correlationId,
-    id_recibo: reciboIdSanitized,
-    status_recibo: recibo.status_recibo,
-    lock_duration_ms: lockDuration
-  });
-});
-
-    // ============================================================
-    // FASE 2: RESOLVER RUTA DEL PDF
-    // ============================================================
-    if (recibo.ruta_pdf) {
-      const bucketPrefix = `gs://${config.gcs.bucket}/`;
+    // ==========================================================
+    // FASE 1: LOCK LÓGICO + VALIDACIÓN (TRANSACCIÓN)
+    // ==========================================================
+    await executeInTransaction(async (conn) => {
       
-      // Validar que ruta_pdf coincida con bucket configurado
-      if (!recibo.ruta_pdf.startsWith(bucketPrefix)) {
-        throw new Error(
-          "ruta_pdf en BD no coincide con bucket configurado"
-        );
-      }
-      
-      rutaPdfFinal = recibo.ruta_pdf.replace(bucketPrefix, "");
-      
-      // Validar que no tenga path traversal
-      if (rutaPdfFinal.includes('..') || rutaPdfFinal.startsWith('/')) {
-        throw new Error(
-          "ruta_pdf contiene caracteres peligrosos"
-        );
+      // Construcción condicional de query
+      let selectQuery;
+      let selectParams;
+
+      if (hasStatus) {
+        const statusPlaceholders = validStatuses.map(() => '?').join(',');
+        selectQuery = `
+          SELECT *
+          FROM ${table}
+          WHERE ${idField} = ?
+            AND ${statusField} IN (${statusPlaceholders})
+            AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+          FOR UPDATE
+        `;
+        selectParams = [idValueSanitized, ...validStatuses];
+      } else {
+        selectQuery = `
+          SELECT *
+          FROM ${table}
+          WHERE ${idField} = ?
+            AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+          FOR UPDATE
+        `;
+        selectParams = [idValueSanitized];
       }
 
-      logger.info("Usando ruta_pdf existente para sobrescritura", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
-        ruta_pdf: recibo.ruta_pdf
+      const [[row]] = await conn.execute(selectQuery, selectParams);
+
+      if (!row) {
+        throw new Error("Registro no válido para regeneración o está siendo procesado");
+      }
+
+      rowSnapshot = row;
+
+      // Activar lock con validación race-condition safe
+      const [lockResult] = await conn.execute(
+        `UPDATE ${table}
+         SET generando_pdf = TRUE
+         WHERE ${idField} = ?
+           AND (generando_pdf IS NULL OR generando_pdf = FALSE)`,
+        [idValueSanitized]
+      );
+
+      if (lockResult.affectedRows !== 1) {
+        throw new Error("No se pudo activar lock de generación de PDF");
+      }
+
+      logger.info("Lock activado en regeneración", {
+        table,
+        [idField]: idValueSanitized,
+        hasStatus,
+        correlationId
       });
-    } else {
-      // FALLBACK DETERMINÍSTICO: Si el recibo nunca tuvo PDF o se perdió
-      // la referencia, usamos id_recibo para garantizar unicidad.
-      // Esto puede ocurrir si:
-      // - El recibo se emitió antes de guardar ruta_pdf
-      // - Hubo un error parcial en emisión original
-      // - Migración de datos históricos
-      rutaPdfFinal = `recibos/${reciboIdSanitized}.pdf`;
+    });
 
-      logger.warn("Recibo sin ruta_pdf, usando fallback por id_recibo", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
+    // ==========================================================
+    // FASE 2: VALIDACIÓN EXTRA (OPCIONAL)
+    // ==========================================================
+    if (extraValidation) {
+      await extraValidation(rowSnapshot);
+    }
+
+    // ==========================================================
+    // FASE 3: RESOLVER RUTA DEL PDF (CON VALIDACIÓN)
+    // ==========================================================
+    if (rowSnapshot.ruta_pdf && typeof rowSnapshot.ruta_pdf === 'string' && rowSnapshot.ruta_pdf.trim().length > 0) {
+      const bucketPrefix = `gs://${config.gcs.bucket}/`;
+
+      if (!rowSnapshot.ruta_pdf.startsWith(bucketPrefix)) {
+        logger.warn("ruta_pdf no coincide con bucket, usando fallback", {
+          table,
+          [idField]: idValueSanitized,
+          ruta_actual: rowSnapshot.ruta_pdf
+        });
+        rutaPdfFinal = `${folder}/${idValueSanitized}.pdf`;
+      } else {
+        rutaPdfFinal = rowSnapshot.ruta_pdf.replace(bucketPrefix, "");
+
+        if (rutaPdfFinal.includes('..') || rutaPdfFinal.startsWith('/')) {
+          logger.error("ruta_pdf contiene path traversal, usando fallback", {
+            table,
+            [idField]: idValueSanitized,
+            ruta_peligrosa: rutaPdfFinal
+          });
+          rutaPdfFinal = `${folder}/${idValueSanitized}.pdf`;
+        }
+      }
+    } else {
+      // Fallback determinístico
+      rutaPdfFinal = `${folder}/${idValueSanitized}.pdf`;
+      
+      logger.info("Usando ruta fallback (sin ruta_pdf previa)", {
+        table,
+        [idField]: idValueSanitized,
         ruta_generada: rutaPdfFinal
       });
     }
 
-  // ============================================================
-// FASE 3: GENERAR PDF
-// ============================================================
+    // ==========================================================
+    // FASE 4: HIDRATAR
+    // ==========================================================
+    const hydrated = await hydrator(idValueSanitized);
 
-// 🔹 Rehidratar recibo con nombre completo del alumno
-const reciboParaPdf = await getReciboHydrated(reciboIdSanitized);
+    if (!hydrated) {
+      throw new Error("No se pudo hidratar el registro");
+    }
 
-if (!reciboParaPdf) {
-  throw new Error("No se pudo obtener recibo para regeneración");
-}
+    logger.info("Registro hidratado exitosamente", {
+      table,
+      [idField]: idValueSanitized,
+      correlationId
+    });
 
-if (!['Emitido','Cancelado'].includes(reciboParaPdf.status_recibo)) {
-  throw new Error("Estado no permitido para regeneración de PDF");
-}
+    // ==========================================================
+    // FASE 5: GENERAR PDF
+    // ==========================================================
+    const pdfBuffer = await pdfGenerator(hydrated);
 
+    if (!pdfBuffer || pdfBuffer.length === 0) {
+      throw new Error("PDF generado vacío");
+    }
 
-// Validar datos mínimos necesarios para PDF
-if (!reciboParaPdf.id_alumno || !reciboParaPdf.fecha_emision) {
-  throw new Error(
-    "Recibo con datos incompletos - no se puede generar PDF"
-  );
-}
-
-const [detalles] = await pool.execute(
-  `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
-  [reciboIdSanitized]
-);
-
-// Validar que existan detalles
-if (!detalles || detalles.length === 0) {
-  throw new Error(
-    "Recibo sin detalles - no se puede generar PDF"
-  );
-}
-
-logger.info("Iniciando generación de PDF", {
-  correlation_id: correlationId,
-  id_recibo: reciboIdSanitized,
-  num_detalles: detalles.length,
-  status_recibo: reciboParaPdf.status_recibo,
-  alumno: reciboParaPdf.alumno_nombre_completo
-});
-
-pdfBuffer = await generateReciboPDF(reciboParaPdf, detalles);
-
-// Validar que el PDF se generó correctamente
-if (!pdfBuffer || pdfBuffer.length === 0) {
-  throw new Error(
-    "PDF generado está vacío - operación abortada"
-  );
-}
-
-logger.info("PDF generado en memoria", {
-  correlation_id: correlationId,
-  id_recibo: reciboIdSanitized,
-  buffer_size_kb: (pdfBuffer.length / 1024).toFixed(2)
-});
-
-    // ============================================================
-    // FASE 4: SOBRESCRIBIR ARCHIVO EN GCS
-    // ============================================================
-    logger.info("Iniciando subida a GCS", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      ruta_destino: rutaPdfFinal,
-      buffer_size_kb: (pdfBuffer.length / 1024).toFixed(2)
+    logger.info("PDF generado en memoria", {
+      table,
+      [idField]: idValueSanitized,
+      buffer_size_kb: (pdfBuffer.length / 1024).toFixed(2),
+      correlationId
     });
 
     await deleteFileIfExists(rutaPdfFinal);
     const rutaGs = await uploadPdfToGCS(pdfBuffer, rutaPdfFinal);
 
-    // Validar que GCS retornó ruta válida
-    if (!rutaGs || !rutaGs.startsWith('gs://')) {
-      throw new Error(
-        "Ruta GCS inválida devuelta por uploadPdfToGCS"
-      );
+    if (!rutaGs || !rutaGs.startsWith("gs://")) {
+      throw new Error("Ruta GCS inválida");
     }
 
-    logger.info("PDF regenerado y subido correctamente", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      ruta_gs: rutaGs
+    logger.info("PDF subido a GCS", {
+      table,
+      [idField]: idValueSanitized,
+      ruta_gs: rutaGs,
+      correlationId
     });
 
-    // ============================================================
-    // FASE 5: ACTUALIZAR BD (si era fallback)
-    // ============================================================
-    const esRegeneracionConFallback = !recibo.ruta_pdf;
 
-    if (esRegeneracionConFallback) {
-      await pool.execute(
-        `
-        UPDATE recibos
-        SET ruta_pdf = ?
-        WHERE id_recibo = ?
-        `,
-        [rutaGs, reciboIdSanitized]
-      );
+// ==========================================================
+// FASE 6: ACTUALIZAR RUTA SI CAMBIÓ
+// ==========================================================
+if (!rowSnapshot.ruta_pdf || rowSnapshot.ruta_pdf !== rutaGs) {
+  await pool.execute(
+    `UPDATE ${table}
+     SET ruta_pdf = ?
+     WHERE ${idField} = ?`,
+    [rutaGs, idValueSanitized]
+  );
+}
 
-      logger.info("ruta_pdf actualizada por fallback", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
-        ruta_pdf: rutaGs
-      });
-    }
+const duration = Date.now() - startTime;
 
-    const duration = Date.now() - startTime;
+logger.info("Regeneración de PDF completada exitosamente", {
+  table,
+  [idField]: idValueSanitized,
+  ruta_pdf: rutaGs,
+  duration_ms: duration,
+  pdf_size_kb: (pdfBuffer.length / 1024).toFixed(2),
+  correlationId
+});
 
-    logger.info("Regeneración de PDF completada exitosamente", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      ruta_pdf: rutaGs,
-      duration_ms: duration,
-      pdf_size_kb: (pdfBuffer.length / 1024).toFixed(2),
-      status_recibo: recibo.status_recibo,
-      fallback_usado: esRegeneracionConFallback
-    });
+return {
+  ruta_pdf: rutaGs,
+  duration_ms: duration
+};
 
-    res.json({
-      ok: true,
-      id_recibo: reciboIdSanitized,
-      ruta_pdf: rutaGs,
-      regenerated: true,
-      duration_ms: duration
-    });
-
-  } catch (error) {
-    logger.error("Error al regenerar PDF del recibo", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      error_message: error.message,
-      stack: error.stack,
-      duration_ms: Date.now() - startTime
-    });
-
-    next(error);
 
   } finally {
-    // ============================================================
-    // FASE 6: LIMPIEZA GARANTIZADA DEL LOCK
-    // ============================================================
+    // ==========================================================
+    // LIMPIEZA GARANTIZADA DEL LOCK (CON VERIFICACIÓN)
+    // ==========================================================
     try {
-      await pool.execute(
-        `
-        UPDATE recibos
-        SET generando_pdf = FALSE
-        WHERE id_recibo = ?
-        `,
-        [reciboIdSanitized]
-      );
+      let cleanupQuery;
+      let cleanupParams;
 
-      logger.info("Lock técnico liberado (generando_pdf = FALSE)", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized
-      });
+      if (cleanupEnimpresion) {
+        cleanupQuery = `
+          UPDATE ${table}
+          SET generando_pdf = FALSE,
+              enimpresion = FALSE
+          WHERE ${idField} = ?
+            AND generando_pdf = TRUE
+        `;
+      } else {
+        cleanupQuery = `
+          UPDATE ${table}
+          SET generando_pdf = FALSE
+          WHERE ${idField} = ?
+            AND generando_pdf = TRUE
+        `;
+      }
+
+      cleanupParams = [idValueSanitized];
+
+      const [cleanupResult] = await pool.execute(cleanupQuery, cleanupParams);
+
+      if (cleanupResult.affectedRows === 0) {
+        logger.warn("Lock ya fue limpiado por otro proceso", {
+          table,
+          [idField]: idValueSanitized,
+          correlationId
+        });
+      } else {
+        logger.info("Lock liberado correctamente", {
+          table,
+          [idField]: idValueSanitized,
+          cleanup_enimpresion: cleanupEnimpresion,
+          correlationId
+        });
+      }
 
     } catch (cleanupError) {
-      logger.error("ERROR CRÍTICO: No se pudo limpiar generando_pdf", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
+      logger.error("ERROR CRÍTICO: No se pudo limpiar lock", {
+        table,
+        [idField]: idValueSanitized,
         error: cleanupError.message,
-        ACCION_REQUERIDA: "Revisar manualmente registro en BD y limpiar flag"
+        ACCION_REQUERIDA: "Revisar registro manualmente en BD",
+        correlationId
       });
     }
   }
+}
+
+// ==========================================================
+// ENDPOINT: REGENERAR PDF DE RECIBOS
+// ==========================================================
+app.post("/recibos/regenerar-pdf", requireToken, async (req, res, next) => {
+  const { id_recibo } = req.body;
+
+  if (!id_recibo) {
+    return res.status(400).json({ ok: false, error: "id_recibo es requerido" });
+  }
+
+  try {
+    const result = await regeneratePdfEngine({
+      table: "recibos",
+      idValue: id_recibo,
+      validStatuses: ["Emitido", "Cancelado"],
+      hydrator: async (id) => {
+        const recibo = await getReciboHydrated(id);
+        const [detalles] = await pool.execute(
+          `SELECT * FROM recibos_detalle WHERE id_recibo = ?`,
+          [id]
+        );
+        return { ...recibo, detalles };
+      },
+      pdfGenerator: async (data) => generateReciboPDF(data, data.detalles),
+      folder: "recibos",
+      extraValidation: async (row) => {
+        if (!row.id_alumno || !row.fecha_emision) {
+          throw new Error("Recibo con datos incompletos");
+        }
+      }
+    });
+
+    res.json({ ok: true, regenerated: true, ...result });
+
+  } catch (error) {
+    next(error);
+  }
 });
+
+// ==========================================================
+// ENDPOINT: REGENERAR PDF DE CORTES
+// ==========================================================
+app.post("/cortes/regenerar-pdf", requireToken, async (req, res, next) => {
+  const { id_corte } = req.body;
+
+  if (!id_corte) {
+    return res.status(400).json({ ok: false, error: "id_corte es requerido" });
+  }
+
+  try {
+    const result = await regeneratePdfEngine({
+      table: "cortes",
+      idValue: id_corte,
+      validStatuses: [],
+      hydrator: getCorteHydrated,
+      pdfGenerator: generateCortePDF,
+      folder: "cortes"
+    });
+
+    res.json({ ok: true, regenerated: true, ...result });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+
+
+
+
 
 
 
