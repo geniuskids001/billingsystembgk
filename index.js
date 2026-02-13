@@ -364,7 +364,8 @@ const emitirReciboHandler = emitirReciboFactory({
   generateCorteId,
   getReciboPdfPath,
   deleteFileIfExists,
-  uploadPdfToGCS
+  uploadPdfToGCS,
+  calculateReciboTotal 
 });
 
 
