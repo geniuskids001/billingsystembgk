@@ -4,6 +4,7 @@ const { Storage } = require("@google-cloud/storage");
 const { generateReciboPDF } = require("./pdf/recibo_pago_pdf");
 const { generateCortePDF } = require("./pdf/corte_pdf"); 
 
+
 console.log("DEBUG PDF IMPORT:", {
   generateReciboPDF_type: typeof generateReciboPDF,
   generateCortePDF_type: typeof generateCortePDF,
@@ -1815,22 +1816,56 @@ logger.info("PDF generado en memoria", {
     // ============================================================
     const esRegeneracionConFallback = !recibo.ruta_pdf;
 
-    if (esRegeneracionConFallback) {
-      await pool.execute(
-        `
-        UPDATE recibos
-        SET ruta_pdf = ?
-        WHERE id_recibo = ?
-        `,
-        [rutaGs, reciboIdSanitized]
-      );
+if (esRegeneracionConFallback) {
+  const [updateResult] = await pool.execute(
+    `
+    UPDATE recibos
+    SET ruta_pdf = ?
+    WHERE id_recibo = ?
+    `,
+    [rutaGs, reciboIdSanitized]
+  );
 
-      logger.info("ruta_pdf actualizada por fallback", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
-        ruta_pdf: rutaGs
-      });
-    }
+  // 1️⃣ Validar affectedRows
+  if (updateResult.affectedRows !== 1) {
+    logger.error("ERROR CRÍTICO: UPDATE fallback ruta_pdf no afectó filas", {
+      correlation_id: correlationId,
+      id_recibo: reciboIdSanitized,
+      rutaGs,
+      affectedRows: updateResult.affectedRows
+    });
+
+    throw new Error("No se pudo actualizar ruta_pdf en fallback");
+  }
+
+  // 2️⃣ Validación inmediata contra BD
+  const [[verificacion]] = await pool.execute(
+    `
+    SELECT ruta_pdf
+    FROM recibos
+    WHERE id_recibo = ?
+    `,
+    [reciboIdSanitized]
+  );
+
+  if (!verificacion || verificacion.ruta_pdf !== rutaGs) {
+    logger.error("INCONSISTENCIA: ruta_pdf no coincide después del UPDATE fallback", {
+      correlation_id: correlationId,
+      id_recibo: reciboIdSanitized,
+      esperado: rutaGs,
+      guardado: verificacion?.ruta_pdf
+    });
+
+    throw new Error("Inconsistencia detectada al guardar ruta_pdf (fallback)");
+  }
+
+  logger.info("ruta_pdf actualizada y validada correctamente (fallback)", {
+    correlation_id: correlationId,
+    id_recibo: reciboIdSanitized,
+    ruta_pdf: rutaGs
+  });
+}
+
 
     const duration = Date.now() - startTime;
 
