@@ -29,9 +29,15 @@ async function generateReciboPDF(recibo, detalles) {
       const LIGHT_GRAY = "#F8F9FA";
       const BORDER_GRAY = "#CCCCCC";
       const HIGHLIGHT_BG = "#E8F4F8"; // Color suave para resaltar total
-      const logoPath = path.join(__dirname, "assets/businesslogo.png");
+      const logoPath = path.join(__dirname, "../assets/businesslogo.png");
+
 
   /* ================= HEADER ================= */
+
+const fs = require("fs");
+console.log("Logo path:", logoPath);
+console.log("Logo exists:", fs.existsSync(logoPath));
+
 doc.image(logoPath, 50, 50, { width: 70 });
 
 doc

@@ -21,7 +21,8 @@ async function generateCortePDF(corte) {
       const LIGHT_GRAY = "#F8F9FA";
       const BORDER_GRAY = "#CCCCCC";
       const HIGHLIGHT_BG = "#E8F4F8";
-      const logoPath = path.join(__dirname, "assets/businesslogo.png");
+     const logoPath = path.join(__dirname, "../assets/businesslogo.png");
+
 
       /* ================= HEADER - CONSISTENTE CON RECIBO ================= */
       doc.image(logoPath, 50, 50, { width: 70 });
