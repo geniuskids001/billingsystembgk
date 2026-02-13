@@ -1365,11 +1365,30 @@ app.get("/pdf/:tipo/:id/ver", async (req, res, next) => {
     }
 
     // Validación básica de formato UUID (opcional pero recomendado)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(id)) {
-      logger.warn("Formato de UUID inválido", { tipo, id });
-      return res.status(400).send("Formato de ID inválido");
-    }
+// Validación según tipo
+if (tipo === "recibo") {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(id)) {
+    logger.warn("Formato de UUID inválido para recibo", { tipo, id });
+    return res.status(400).send("Formato de ID inválido");
+  }
+}
+
+if (tipo === "corte") {
+  const idTrimmed = id.trim();
+
+  if (
+    idTrimmed.length === 0 ||
+    idTrimmed.length > 255 ||
+    idTrimmed.includes("..") ||
+    idTrimmed.includes("/") ||
+    idTrimmed.includes("\\")
+  ) {
+    logger.warn("Formato de ID inválido para corte", { tipo, id });
+    return res.status(400).send("Formato de ID inválido");
+  }
+}
+
 
     logger.info("Solicitud de PDF recibida", { tipo, id });
 
