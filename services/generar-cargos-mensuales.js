@@ -5,11 +5,12 @@ module.exports = function generarCargosMensualesFactory({
 }) {
   return async function generarCargosMensualesHandler(req, res, next) {
     const startTime = Date.now();
-    let { mes, anio } = req.body;
+    let { mes, anio, alumnos } = req.body;
     
     logger.info("Inicio de generarCargosMensualesHandler", {
       mes_recibido: mes,
       anio_recibido: anio,
+      alumnos_recibidos: alumnos,
       body: req.body
     });
     
@@ -52,6 +53,15 @@ module.exports = function generarCargosMensualesFactory({
       
       logger.info("Generando cargos mensuales", { mes, anio });
       
+      const alumnosList = alumnos
+        ? String(alumnos).split(",").map(a => a.trim())
+        : null;
+      
+      logger.info("Lista de alumnos procesada", {
+        alumnosList,
+        cantidad_alumnos: alumnosList ? alumnosList.length : 'todos'
+      });
+      
       // ============================================================
       // 2️⃣ Transacción completa
       // ============================================================
@@ -80,12 +90,20 @@ module.exports = function generarCargosMensualesFactory({
           FROM alumnos_mensuales am
           JOIN alumnos a ON a.id_alumno = am.id_alumno
           WHERE a.status = 'Activo'
+          ${alumnosList && alumnosList.length > 0 ? 
+            `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
+            : ''
+          }
           ON DUPLICATE KEY UPDATE
             status_cargo = 'Activo',
             motivo_cancelacion = NULL,
             updated_at = NOW()
           `,
-          [mes, anio]
+          [
+            mes,
+            anio,
+            ...(alumnosList && alumnosList.length > 0 ? alumnosList : [])
+          ]
         );
         
         logger.info("INSERT SELECT ejecutado en alumnos_cargos", {
@@ -93,7 +111,8 @@ module.exports = function generarCargosMensualesFactory({
           insertId: executeResult.insertId,
           warningStatus: executeResult.warningStatus,
           mes,
-          anio
+          anio,
+          filtro_alumnos: alumnosList ? 'aplicado' : 'todos'
         });
         
         const procesados = executeResult.affectedRows;
@@ -132,6 +151,7 @@ module.exports = function generarCargosMensualesFactory({
         stack: error.stack,
         mes,
         anio,
+        alumnos: alumnos,
         duration_ms: Date.now() - startTime
       });
       
