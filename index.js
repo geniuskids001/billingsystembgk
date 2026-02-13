@@ -4,6 +4,8 @@ const { Storage } = require("@google-cloud/storage");
 const { generateReciboPDF } = require("./pdf/recibo_pago_pdf");
 const { generateCortePDF } = require("./pdf/corte_pdf"); 
 const emitirReciboFactory = require("./services/emitir-recibo");
+const generarCargosMensualesFactory = require("./services/generar-cargos-mensuales");
+
 
 
 
@@ -368,6 +370,12 @@ const emitirReciboHandler = emitirReciboFactory({
   calculateReciboTotal 
 });
 
+const generarCargosMensualesHandler = generarCargosMensualesFactory({
+  pool,
+  executeInTransaction,
+  logger
+});
+
 
 
 
@@ -564,6 +572,13 @@ if (detalles.length === 0) {
 
 
 /* ================= ENDPOINTS ================= */
+
+
+// ============================================================================
+// GENERAR CARGOS MENSUALES
+// ============================================================================
+app.post("/cargos/generar-mensuales", requireToken, generarCargosMensualesHandler);
+
 
 // ============================================================================
 // CALCULAR RECIBO - Versión optimizada (calculando = solo UX trigger)
