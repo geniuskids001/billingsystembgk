@@ -87,9 +87,20 @@ module.exports = function generarCargosMensualesFactory({
             ?,
             ?,
             'Activo'
-          FROM alumnos_mensuales am
-          JOIN alumnos a ON a.id_alumno = am.id_alumno
-          WHERE a.status = 'Activo'
+         FROM alumnos_mensuales am
+         JOIN alumnos a 
+          ON a.id_alumno = am.id_alumno
+          JOIN productos p 
+            ON p.id_producto = am.id_producto
+          JOIN planteles pl
+            ON pl.id_plantel = a.id_plantel_academico
+          WHERE 
+            a.status = 'Activo'
+            AND p.status = 'Activo'
+            AND p.frecuencia = 'Mensual'
+            AND pl.status = 'Activo'
+
+
           ${alumnosList && alumnosList.length > 0 ? 
             `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
             : ''
