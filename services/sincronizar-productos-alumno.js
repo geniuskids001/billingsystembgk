@@ -79,7 +79,7 @@ console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult
         
         const [insertGlobalesResult] = await conn.execute(
           `
-          INSERT INTO alumnos_mensuales (
+          INSERT IGNORE INTO alumnos_mensuales (
             id_alumno_mensual,
             id_alumno,
             id_producto
@@ -95,7 +95,6 @@ console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult
             AND p.status = 'Activo'
             AND p.frecuencia = 'Mensual'
             AND p.aplica_nivel IS NULL
-          ON DUPLICATE KEY UPDATE id_producto = id_producto
           `,
           [id_alumno, plantelActual]
         );
@@ -110,7 +109,7 @@ console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult
           
           const [insertNivelResult] = await conn.execute(
             `
-            INSERT INTO alumnos_mensuales (
+            INSERT IGNORE INTO alumnos_mensuales (
               id_alumno_mensual,
               id_alumno,
               id_producto
@@ -126,7 +125,6 @@ console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult
               AND p.status = 'Activo'
               AND p.frecuencia = 'Mensual'
               AND p.aplica_nivel = ?
-            ON DUPLICATE KEY UPDATE id_producto = id_producto
             `,
             [id_alumno, plantelActual, nivelActual]
           );
