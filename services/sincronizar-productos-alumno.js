@@ -20,10 +20,11 @@ module.exports = function sincronizarProductosAlumnoFactory({
         const [[alumno]] = await conn.execute(
           `
           SELECT 
-            a.id_alumno,
-            a.id_plantel_academico,
-            a.id_grupo,
-            g.nivel
+          a.id_alumno,
+          a.id_plantel_academico,
+          a.id_grupo,
+          g.id_nivel
+
           FROM alumnos a
           LEFT JOIN grupos g ON g.id_grupo = a.id_grupo
           WHERE a.id_alumno = ?
@@ -38,36 +39,38 @@ module.exports = function sincronizarProductosAlumnoFactory({
         }
 
         const plantelActual = alumno.id_plantel_academico;
-        const nivelActual = alumno.nivel || null;
+        const nivelActual = alumno.id_nivel || null;
 
         console.log(`[SincronizarProductos] Datos del alumno - Plantel: ${plantelActual}, Nivel: ${nivelActual || 'sin grupo'}`);
 
-        // ============================================================
-        // 2️⃣ ELIMINAR asignaciones inválidas
-        // ============================================================
-        console.log(`[SincronizarProductos] Eliminando productos inválidos para alumno ${id_alumno}`);
-        
-        const [deleteResult] = await conn.execute(
-          `
-          DELETE am
-          FROM alumnos_mensuales am
-          JOIN productos p ON p.id_producto = am.id_producto
-          WHERE am.id_alumno = ?
-            AND (
-                  p.id_plantel != ?
-                  OR (
-                       p.aplica_nivel IS NOT NULL
-                       AND (
-                             ? IS NULL
-                             OR p.aplica_nivel != ?
-                           )
-                     )
-                )
-          `,
-          [id_alumno, plantelActual, nivelActual, nivelActual]
-        );
+       // ============================================================
+// 2️⃣ ELIMINAR asignaciones inválidas (SOLO defaults)
+// ============================================================
+console.log(`[SincronizarProductos] Eliminando productos default inválidos para alumno ${id_alumno}`);
 
-        console.log(`[SincronizarProductos] Productos eliminados: ${deleteResult.affectedRows}`);
+const [deleteResult] = await conn.execute(
+  `
+  DELETE am
+  FROM alumnos_mensuales am
+  JOIN productos p ON p.id_producto = am.id_producto
+  WHERE am.id_alumno = ?
+    AND p.producto_default = TRUE
+    AND (
+          p.id_plantel != ?
+          OR (
+               p.aplica_nivel IS NOT NULL
+               AND (
+                     ? IS NULL
+                     OR p.aplica_nivel != ?
+                   )
+             )
+        )
+  `,
+  [id_alumno, plantelActual, nivelActual, nivelActual]
+);
+
+console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult.affectedRows}`);
+
 
         // ============================================================
         // 3️⃣ INSERTAR productos default globales
