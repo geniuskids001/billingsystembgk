@@ -528,6 +528,9 @@ if (detalles.length === 0) {
       }
     }
     
+    descuento = Math.ceil(descuento);
+    recargo = Math.ceil(recargo);
+    
     if (detalle.frecuencia_producto === "Mensual") {
       const [[alumnoMensual]] = await conn.execute(
         `
@@ -540,6 +543,7 @@ if (detalles.length === 0) {
       );
       const becaPct = Number(alumnoMensual?.beca_monto || 0);
       beca = precioBase * becaPct;
+      beca = Math.ceil(beca);
     }
     
     const montoAjuste = Number(detalle.monto_ajuste || 0);
@@ -573,11 +577,6 @@ if (detalles.length === 0) {
   
   return { reciboId, total: totalRecibo };
 }
-
-
-
-
-
 
 /* ================= ENDPOINTS ================= */
 
