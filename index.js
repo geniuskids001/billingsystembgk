@@ -6,6 +6,7 @@ const { generateCortePDF } = require("./pdf/corte_pdf");
 const emitirReciboFactory = require("./services/emitir-recibo");
 const generarCargosMensualesFactory = require("./services/generar-cargos-mensuales");
 const sincronizarProductosAlumnoFactory = require("./services/sincronizar-productos-alumno");
+const cancelarCargosFactory = require("./services/cancelar-cargos");
 
 
 
@@ -384,7 +385,11 @@ const sincronizarProductosAlumnoHandler = sincronizarProductosAlumnoFactory({
   logger
 });
 
-
+const cancelarCargosHandler = cancelarCargosFactory({
+  pool,
+  executeInTransaction,
+  logger
+});
 
 
 /* ================= BUSINESS LOGIC ================= */
@@ -579,6 +584,10 @@ if (detalles.length === 0) {
 }
 
 /* ================= ENDPOINTS ================= */
+
+app.post("/cargos/cancelar", requireToken, cancelarCargosHandler);
+
+
 
 // ============================================================================
 // "Sincronizar productos con alumnos" - Insertar productos default globales y por nivel
