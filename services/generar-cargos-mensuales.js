@@ -6,70 +6,79 @@ module.exports = function generarCargosMensualesFactory({
   return async function generarCargosMensualesHandler(req, res, next) {
     const startTime = Date.now();
     let { mes, anio, alumnos } = req.body;
-    
+
     logger.info("Inicio de generarCargosMensualesHandler", {
       mes_recibido: mes,
       anio_recibido: anio,
       alumnos_recibidos: alumnos,
       body: req.body
     });
-    
+
     try {
-      // ============================================================
-      // 1️⃣ Resolver mes y año (default = Mexico time actual)
-      // ============================================================
-      if (!mes || !anio) {
-        logger.info("Mes o año no proporcionados, calculando valores por defecto");
-        
-        const now = new Date(
-          new Date().toLocaleString("en-US", { timeZone: "America/Mexico_City" })
-        );
-        mes = now.getMonth() + 1;
-        anio = now.getFullYear();
-        
-        logger.info("Valores por defecto calculados", {
-          mes_calculado: mes,
-          anio_calculado: anio,
-          fecha_mexico: now.toISOString()
-        });
-      }
-      
-      mes = Number(mes);
-      anio = Number(anio);
-      
-      logger.info("Valores de mes y año parseados", {
-        mes_final: mes,
-        anio_final: anio
-      });
-      
-      if (mes < 1 || mes > 12) {
-        logger.warn("Validación fallida: mes inválido", { mes });
-        return res.status(400).json({ ok: false, error: "Mes inválido" });
-      }
-      if (anio < 2000 || anio > 2100) {
-        logger.warn("Validación fallida: año inválido", { anio });
-        return res.status(400).json({ ok: false, error: "Año inválido" });
-      }
-      
-      logger.info("Generando cargos mensuales", { mes, anio });
-      
-      const alumnosList = alumnos
-        ? String(alumnos).split(",").map(a => a.trim())
-        : null;
-      
-      logger.info("Lista de alumnos procesada", {
-        alumnosList,
-        cantidad_alumnos: alumnosList ? alumnosList.length : 'todos'
-      });
-      
-      // ============================================================
-      // 2️⃣ Transacción completa
-      // ============================================================
+
       logger.info("Iniciando transacción para generación de cargos");
-      
+
       const result = await executeInTransaction(async (conn) => {
-        logger.info("Transacción iniciada, ejecutando INSERT SELECT para alumnos_cargos");
-        
+
+        const txStart = Date.now();
+
+        // ============================================================
+        // 1️⃣ Resolver mes y año (default = MySQL Mexico timezone)
+        // ============================================================
+
+        if (mes == null || anio == null) {
+          logger.info("Mes o año no proporcionados, obteniendo desde MySQL (CURDATE Mexico)");
+
+          const [[rowFecha]] = await conn.execute(`
+            SELECT 
+              MONTH(CURDATE()) AS mes,
+              YEAR(CURDATE()) AS anio
+          `);
+
+          mes = rowFecha.mes;
+          anio = rowFecha.anio;
+
+          logger.info("Valores por defecto obtenidos desde MySQL", {
+            mes_calculado: mes,
+            anio_calculado: anio
+          });
+        }
+
+        mes = Number(mes);
+        anio = Number(anio);
+
+        logger.info("Valores de mes y año parseados", {
+          mes_final: mes,
+          anio_final: anio
+        });
+
+        if (mes < 1 || mes > 12) {
+          logger.warn("Validación fallida: mes inválido", { mes });
+          throw new Error("Mes inválido");
+        }
+
+        if (anio < 2000 || anio > 2100) {
+          logger.warn("Validación fallida: año inválido", { anio });
+          throw new Error("Año inválido");
+        }
+
+        logger.info("Preparando generación de cargos mensuales", { mes, anio });
+
+        const alumnosList = alumnos
+          ? String(alumnos).split(",").map(a => a.trim())
+          : null;
+
+        logger.info("Lista de alumnos procesada", {
+          alumnosList,
+          cantidad_alumnos: alumnosList ? alumnosList.length : 'todos'
+        });
+
+        logger.info("Ejecutando INSERT SELECT en alumnos_cargos", {
+          mes,
+          anio,
+          filtro_alumnos: alumnosList ? 'aplicado' : 'todos'
+        });
+
         const [executeResult] = await conn.execute(
           `
           INSERT INTO alumnos_cargos (
@@ -87,9 +96,9 @@ module.exports = function generarCargosMensualesFactory({
             ?,
             ?,
             'Activo'
-         FROM alumnos_mensuales am
-         JOIN alumnos a 
-          ON a.id_alumno = am.id_alumno
+          FROM alumnos_mensuales am
+          JOIN alumnos a 
+            ON a.id_alumno = am.id_alumno
           JOIN productos p 
             ON p.id_producto = am.id_producto
           JOIN planteles pl
@@ -99,10 +108,8 @@ module.exports = function generarCargosMensualesFactory({
             AND p.status = 'Activo'
             AND p.frecuencia = 'Mensual'
             AND pl.status = 'Activo'
-
-
-          ${alumnosList && alumnosList.length > 0 ? 
-            `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
+          ${alumnosList && alumnosList.length > 0 
+            ? `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
             : ''
           }
           ON DUPLICATE KEY UPDATE
@@ -116,44 +123,55 @@ module.exports = function generarCargosMensualesFactory({
             ...(alumnosList && alumnosList.length > 0 ? alumnosList : [])
           ]
         );
-        
+
+        const txDuration = Date.now() - txStart;
+
         logger.info("INSERT SELECT ejecutado en alumnos_cargos", {
           affectedRows: executeResult.affectedRows,
           insertId: executeResult.insertId,
           warningStatus: executeResult.warningStatus,
           mes,
           anio,
-          filtro_alumnos: alumnosList ? 'aplicado' : 'todos'
+          filtro_alumnos: alumnosList ? 'aplicado' : 'todos',
+          tx_duration_ms: txDuration
         });
-        
-        const procesados = executeResult.affectedRows;
-        
-        logger.info("Todos los cargos procesados en transacción", {
-          total_procesados: procesados
+
+        logger.info("Transacción interna completada correctamente", {
+          mes,
+          anio,
+          total_procesados: executeResult.affectedRows,
+          tx_duration_ms: txDuration
         });
-        
-        return { procesados };
+
+        return {
+          mes,
+          anio,
+          procesados: executeResult.affectedRows,
+          tx_duration_ms: txDuration
+        };
       });
-      
-      logger.info("Transacción completada exitosamente");
-      
+
       const duration = Date.now() - startTime;
-      
+
       logger.info("Cargos mensuales generados correctamente", {
-        mes,
-        anio,
+        mes: result.mes,
+        anio: result.anio,
         procesados: result.procesados,
-        duration_ms: duration
+        tx_duration_ms: result.tx_duration_ms,
+        total_duration_ms: duration
       });
-      
+
       res.json({
         ok: true,
-        mes,
-        anio,
+        mes: result.mes,
+        anio: result.anio,
         procesados: result.procesados,
-        duration_ms: duration
+        tx_duration_ms: result.tx_duration_ms,
+        total_duration_ms: duration
       });
+
     } catch (error) {
+
       logger.error("Error al generar cargos mensuales", {
         error_message: error.message,
         error_code: error.code,
@@ -162,10 +180,10 @@ module.exports = function generarCargosMensualesFactory({
         stack: error.stack,
         mes,
         anio,
-        alumnos: alumnos,
+        alumnos,
         duration_ms: Date.now() - startTime
       });
-      
+
       next(error);
     }
   };
