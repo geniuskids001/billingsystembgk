@@ -184,6 +184,21 @@ calculateReciboTotal
         corteId 
       });
 
+      // Crear corte si no existe
+await conn.execute(
+  `
+  INSERT INTO cortes (id_corte, fecha, id_plantel, id_usuario)
+  VALUES (?, ?, ?, ?)
+  ON DUPLICATE KEY UPDATE id_corte = id_corte
+  `,
+  [
+    corteId,
+    row.fecha,
+    row.id_plantel,
+    row.id_usuario
+  ]
+);
+
       // ────────────────────────────────────────────────────────────────────
       // 1.8 Actualizar recibo a Emitido con validación de estado
       // ────────────────────────────────────────────────────────────────────
