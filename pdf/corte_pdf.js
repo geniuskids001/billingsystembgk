@@ -15,25 +15,23 @@ async function generateCortePDF(corte) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // ── Paleta ────────────────────────────────────────────────────
-      const COLOR           = "#00739A";  // azul corporativo
+      const COLOR           = "#00739A";
       const GRAY            = "#666666";
       const LIGHT_GRAY      = "#F8F9FA";
       const BORDER_GRAY     = "#CCCCCC";
-
-      const C_TARJETA       = "#00739A";  // azul
-      const C_TRANSFERENCIA = "#E87722";  // naranja
-      const C_EFECTIVO      = "#1A8C4E";  // verde
-      const C_TOTAL         = "#222222";  // negro
-      const BG_TOTAL        = "#E4E4E4";  // gris resaltado
-      const C_GASTOS        = "#CC0000";  // rojo
+      const C_TARJETA       = "#00739A";
+      const C_TRANSFERENCIA = "#E87722";
+      const C_EFECTIVO      = "#1A8C4E";
+      const C_TOTAL         = "#222222";
+      const BG_TOTAL        = "#E4E4E4";
+      const C_GASTOS        = "#CC0000";
       const BG_GASTOS       = "#FFF0F0";
-      const C_NETO          = "#0066CC";  // azul vistoso
+      const C_NETO          = "#0066CC";
       const BG_NETO         = "#E0EDFF";
 
       const logoPath = path.join(__dirname, "../assets/businesslogo.png");
 
-      /* ── ICONOS (primitivas PDFKit) ─────────────────────────────── */
+      /* ── ICONOS ─────────────────────────────────────────────────── */
 
       const drawCircleBg = (cx, cy, r, color) => {
         doc.save().circle(cx, cy, r).fillOpacity(0.13).fill(color).restore();
@@ -68,11 +66,12 @@ async function generateCortePDF(corte) {
       };
 
       const iconTotal = (cx, cy, color) => {
-        drawCircleBg(cx, cy, 13, color);
-        doc.save().fillColor(color).fontSize(15).font("Helvetica-Bold")
-          .text("Σ", cx - 5.5, cy - 8.5, { lineBreak: false });
-        doc.restore();
-      };
+  drawCircleBg(cx, cy, 13, color);
+  doc.save().strokeColor(color).lineWidth(2);
+  doc.moveTo(cx - 6, cy - 3).lineTo(cx + 6, cy - 3).stroke();
+  doc.moveTo(cx - 6, cy + 3).lineTo(cx + 6, cy + 3).stroke();
+  doc.restore();
+};
 
       const iconGastos = (cx, cy, color) => {
         drawCircleBg(cx, cy, 13, color);
@@ -90,11 +89,7 @@ async function generateCortePDF(corte) {
         doc.restore();
       };
 
-      /* ── HEADER ──────────────────────────────────────────────────
-         Derecha (de arriba a abajo):
-           fecha · usuario · CORTE DE CAJA · folio · plantel
-         → al doblar la hoja quedan visibles fecha y usuario.
-      ─────────────────────────────────────────────────────────── */
+      /* ── HEADER ─────────────────────────────────────────────────── */
 
       if (!corte.fecha) throw new Error("Corte sin fecha - datos inconsistentes");
 
@@ -110,35 +105,39 @@ async function generateCortePDF(corte) {
 
       doc.image(logoPath, 50, 50, { width: 70 });
 
-      // Fecha y usuario ENCIMA del título (para doblez)
-      doc.fillColor(GRAY).fontSize(8).font("Helvetica")
+      // ✅ FIX 2: Fecha y usuario en NEGRITAS arriba del título
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica-Bold")
         .text(fechaCorteFormateada, 200, 50, { align: "right" })
         .text(nombreResponsable,    200, 62, { align: "right" });
 
-      // Título
-      doc.fillColor(COLOR).fontSize(22).font("Helvetica-Bold")
+      // ✅ FIX 2: Título más pequeño (18 en lugar de 22) para que respire
+      doc.fillColor(COLOR).fontSize(18).font("Helvetica-Bold")
         .text("CORTE DE CAJA", 200, 76, { align: "right" });
 
-      // Folio + Plantel debajo del título sin encimarse
+      // Folio abreviado para evitar desbordamiento + Plantel sin encimarse
+      const folioCorto = corte.id_corte
+        ? corte.id_corte.toString().slice(0, 8).toUpperCase() + "..."
+        : "N/A";
+
       doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text(`Folio: ${corte.id_corte || "N/A"}`,        200, 106, { align: "right" })
-        .text(`Plantel: ${corte.nombre_plantel || "N/A"}`, 200, 118, { align: "right" });
+        .text(`Folio: ${folioCorto}`,                          200, 102, { align: "right" })
+        .text(`Plantel: ${corte.nombre_plantel || "N/A"}`,     200, 114, { align: "right" });
 
-      doc.moveTo(50, 140).lineTo(562, 140).lineWidth(1.5).stroke(COLOR);
+      doc.moveTo(50, 136).lineTo(562, 136).lineWidth(1.5).stroke(COLOR);
 
-      /* ── CUANDO · QUIÉN · DÓNDE ──────────────────────────────── */
+      /* ── ✅ FIX 4: FECHA · RESPONSABLE · PLANTEL ───────────────── */
 
-      const infoY = 155;
+      const infoY = 151;
 
-      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("CUANDO", 50, infoY);
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("FECHA", 50, infoY);
       doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
         .text(fechaCorteFormateada, 50, infoY + 12, { width: 165 });
 
-      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("QUIÉN", 230, infoY);
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("RESPONSABLE", 230, infoY);
       doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
         .text(nombreResponsable, 230, infoY + 12, { width: 165 });
 
-      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("DÓNDE", 410, infoY);
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("PLANTEL", 410, infoY);
       doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
         .text(corte.nombre_plantel || "N/A", 410, infoY + 12, { width: 145 });
 
@@ -150,25 +149,32 @@ async function generateCortePDF(corte) {
 
       const cardsTop = sectionY + 20;
       const cardW    = 157;
-      const cardH    = 72;
+      const cardH    = 78;  // un poco más alto para que respire el ícono
       const cardGap  = 10;
 
+      // ✅ FIX 1: Label arriba, ícono en medio con más espacio, monto abajo
       const drawCard = (x, y, label, amount, cardColor, bgColor, iconFn) => {
         doc.rect(x, y, cardW, cardH).lineWidth(2).fillAndStroke(bgColor, cardColor);
-        if (iconFn) iconFn(x + 18, y + 22, cardColor);
+
+        // Etiqueta arriba
         doc.fillColor(GRAY).fontSize(7.5).font("Helvetica")
           .text(label, x + 10, y + 10, { width: cardW - 20 });
+
+        // Ícono centrado con espacio respecto al label
+        if (iconFn) iconFn(x + 20, y + 34, cardColor);
+
+        // Monto alineado abajo a la derecha
         doc.fillColor(cardColor).fontSize(17).font("Helvetica-Bold")
-          .text(`$${Number(amount || 0).toFixed(2)}`, x + 10, y + 42,
+          .text(`$${Number(amount || 0).toFixed(2)}`, x + 10, y + 50,
                 { width: cardW - 20, align: "right" });
       };
 
-      // Fila 1: Tarjeta | Transferencia | Efectivo
-      drawCard(50,                     cardsTop, "TARJETA",       corte.total_tarjeta,       C_TARJETA,       LIGHT_GRAY, iconTarjeta);
-      drawCard(50 + cardW + cardGap,   cardsTop, "TRANSFERENCIA", corte.total_transferencia, C_TRANSFERENCIA, "#FFF6EE",  iconTransferencia);
-      drawCard(50 + (cardW+cardGap)*2, cardsTop, "EFECTIVO",      corte.total_efectivo,      C_EFECTIVO,      "#F0FAF4",  iconEfectivo);
+      // ✅ FIX 3: Orden → Efectivo | Tarjeta | Transferencia
+      drawCard(50,                     cardsTop, "EFECTIVO",      corte.total_efectivo,      C_EFECTIVO,      "#F0FAF4",  iconEfectivo);
+      drawCard(50 + cardW + cardGap,   cardsTop, "TARJETA",       corte.total_tarjeta,       C_TARJETA,       LIGHT_GRAY, iconTarjeta);
+      drawCard(50 + (cardW+cardGap)*2, cardsTop, "TRANSFERENCIA", corte.total_transferencia, C_TRANSFERENCIA, "#FFF6EE",  iconTransferencia);
 
-      // Fila 2: Total | Gastos | Neto
+      // Fila 2: Total | Gastos | Neto (sin cambios)
       const row2Top = cardsTop + cardH + 12;
       drawCard(50,                     row2Top, "TOTAL INGRESOS",  corte.total,               C_TOTAL,  BG_TOTAL,  iconTotal);
       drawCard(50 + cardW + cardGap,   row2Top, "GASTOS EFECTIVO", corte.gastos_efectivo,     C_GASTOS, BG_GASTOS, iconGastos);
@@ -221,7 +227,7 @@ async function generateCortePDF(corte) {
 
       doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#E8F4F8");
       doc.fillColor(COLOR).fontSize(9).font("Helvetica-Bold")
-        .text("TOTALES",                                 tableLeft + 10,  matrixY, { width: 100 })
+        .text("TOTALES",                                       tableLeft + 10,  matrixY, { width: 100 })
         .text(`${corte.totales_columnas?.Tarjeta || 0}`,       tableLeft + 120, matrixY, { width: colWidth, align: "right" })
         .text(`${corte.totales_columnas?.Transferencia || 0}`, tableLeft + 210, matrixY, { width: colWidth, align: "right" })
         .text(`${corte.totales_columnas?.Efectivo || 0}`,      tableLeft + 300, matrixY, { width: colWidth, align: "right" })
@@ -234,8 +240,6 @@ async function generateCortePDF(corte) {
               { align: "center", width: 512 });
 
       const footerY = 750;
-
-      // ⚠️ Sin esto PDFKit crea segunda página
       doc.page.margins.bottom = 0;
 
       doc.rect(0, footerY, doc.page.width, 42).fill(COLOR);
@@ -244,7 +248,6 @@ async function generateCortePDF(corte) {
 
       if (corte.razon_social || corte.rfc || corte.ubicacion) {
         doc.fillColor("#FFFFFF").fontSize(8).font("Helvetica");
-
         if (corte.razon_social)
           doc.text(corte.razon_social, 50, footerY + 14, { width: 180, align: "left" });
         if (corte.rfc)
