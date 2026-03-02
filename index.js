@@ -423,18 +423,18 @@ async function calculateReciboTotal(conn, reciboId) {
     [reciboId]
   );
   
-if (detalles.length === 0) {
-  await conn.execute(
-    `
-    UPDATE recibos
-    SET total_recibo = 0
-    WHERE id_recibo = ?
-    `,
-    [reciboId]
-  );
+  if (detalles.length === 0) {
+    await conn.execute(
+      `
+      UPDATE recibos
+      SET total_recibo = 0
+      WHERE id_recibo = ?
+      `,
+      [reciboId]
+    );
 
-  return { reciboId, total: 0 };
-}
+    return { reciboId, total: 0 };
+  }
 
   
   let totalRecibo = 0;
@@ -523,19 +523,8 @@ if (detalles.length === 0) {
         ]
       );
     }
-    
-    for (const regla of reglas) {
-      if (regla.pct_descuento) {
-        descuento += precioBase * regla.pct_descuento;
-      }
-      if (regla.pct_recargo) {
-        recargo += precioBase * regla.pct_recargo;
-      }
-    }
-    
-    descuento = Math.ceil(descuento);
-    recargo = Math.ceil(recargo);
-    
+
+    // ✅ 1. Calcular beca primero
     if (detalle.frecuencia_producto === "Mensual") {
       const [[alumnoMensual]] = await conn.execute(
         `
@@ -546,14 +535,31 @@ if (detalles.length === 0) {
         `,
         [recibo.id_alumno, detalle.id_producto]
       );
+
       const becaPct = Number(alumnoMensual?.beca_monto || 0);
-      beca = precioBase * becaPct;
-      beca = Math.ceil(beca);
+      beca = Math.ceil(precioBase * becaPct);
     }
-    
+
+    // ✅ 2. Base post beca
+    const basePostBeca = precioBase - beca;
+
+    // ✅ 3. Descuentos y recargos sobre base post beca
+    for (const regla of reglas) {
+      if (regla.pct_descuento) {
+        descuento += basePostBeca * regla.pct_descuento;
+      }
+      if (regla.pct_recargo) {
+        recargo += basePostBeca * regla.pct_recargo;
+      }
+    }
+
+    descuento = Math.ceil(descuento);
+    recargo = Math.ceil(recargo);
+
+    // ✅ 4. Precio final sobre base post beca
     const montoAjuste = Number(detalle.monto_ajuste || 0);
     const precioCalculado =
-      precioBase - descuento - beca + recargo + montoAjuste;
+      basePostBeca - descuento + recargo + montoAjuste;
     const precioFinal = Math.max(0, Math.ceil(precioCalculado));
     
     await conn.execute(
