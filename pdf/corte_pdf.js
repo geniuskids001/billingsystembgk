@@ -1,7 +1,6 @@
 const PDFDocument = require("pdfkit");
 const path = require("path");
 
-
 async function generateCortePDF(corte) {
   return new Promise((resolve, reject) => {
     try {
@@ -16,52 +15,88 @@ async function generateCortePDF(corte) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      const COLOR = "#00739A";
-      const GRAY = "#666666";
-      const LIGHT_GRAY = "#F8F9FA";
-      const BORDER_GRAY = "#CCCCCC";
-      const HIGHLIGHT_BG = "#E8F4F8";
-     const logoPath = path.join(__dirname, "../assets/businesslogo.png");
+      // ── Paleta ────────────────────────────────────────────────────
+      const COLOR           = "#00739A";  // azul corporativo
+      const GRAY            = "#666666";
+      const LIGHT_GRAY      = "#F8F9FA";
+      const BORDER_GRAY     = "#CCCCCC";
 
+      const C_TARJETA       = "#00739A";  // azul
+      const C_TRANSFERENCIA = "#E87722";  // naranja
+      const C_EFECTIVO      = "#1A8C4E";  // verde
+      const C_TOTAL         = "#222222";  // negro
+      const BG_TOTAL        = "#E4E4E4";  // gris resaltado
+      const C_GASTOS        = "#CC0000";  // rojo
+      const BG_GASTOS       = "#FFF0F0";
+      const C_NETO          = "#0066CC";  // azul vistoso
+      const BG_NETO         = "#E0EDFF";
 
-      /* ================= HEADER - CONSISTENTE CON RECIBO ================= */
-      doc.image(logoPath, 50, 50, { width: 70 });
+      const logoPath = path.join(__dirname, "../assets/businesslogo.png");
 
-      doc
-        .fillColor(COLOR)
-        .fontSize(22)
-        .font("Helvetica-Bold")
-        .text("CORTE DE CAJA", 200, 50, { align: "right" });
+      /* ── ICONOS (primitivas PDFKit) ─────────────────────────────── */
 
-      doc
-        .fillColor(GRAY)
-        .fontSize(9)
-        .font("Helvetica")
-        .text(`Folio: ${corte.id_corte || 'N/A'}`, 200, 80, { align: "right" })
-        .text(`Plantel: ${corte.nombre_plantel || 'N/A'}`, 200, 93, {
-          align: "right"
-        });
+      const drawCircleBg = (cx, cy, r, color) => {
+        doc.save().circle(cx, cy, r).fillOpacity(0.13).fill(color).restore();
+      };
 
-      doc
-        .moveTo(50, 135)
-        .lineTo(562, 135)
-        .lineWidth(1.5)
-        .stroke(COLOR);
+      const iconTarjeta = (cx, cy, color) => {
+        drawCircleBg(cx, cy, 13, color);
+        doc.save().strokeColor(color).lineWidth(1.2);
+        doc.roundedRect(cx - 9, cy - 6, 18, 12, 2).stroke();
+        doc.save().fillOpacity(0.35).fillColor(color)
+          .rect(cx - 9, cy - 2.5, 18, 3).fill().restore();
+        doc.restore();
+      };
 
-      /* ================= JERARQUÍA VISUAL: CUÁNDO ================= */
-      doc
-        .fillColor("#333333")
-        .fontSize(9)
-        .font("Helvetica")
-        .text("FECHA DEL CORTE", 50, 155, {
-          width: 512,
-          align: "right"
-        });
+      const iconEfectivo = (cx, cy, color) => {
+        drawCircleBg(cx, cy, 13, color);
+        doc.save().strokeColor(color).lineWidth(1.2);
+        doc.roundedRect(cx - 10, cy - 6, 20, 12, 1.5).stroke();
+        doc.fillColor(color).fontSize(8).font("Helvetica-Bold")
+          .text("$", cx - 3, cy - 5.5, { lineBreak: false });
+        doc.restore();
+      };
 
-      // Validación de fecha
-      if (!corte.fecha) {
-        throw new Error("Corte sin fecha - datos inconsistentes");
-      }
+      const iconTransferencia = (cx, cy, color) => {
+        drawCircleBg(cx, cy, 13, color);
+        doc.save().strokeColor(color).lineWidth(1.5);
+        doc.moveTo(cx - 7, cy - 2.5).lineTo(cx + 5, cy - 2.5).stroke();
+        doc.moveTo(cx + 2, cy - 5.5).lineTo(cx + 5, cy - 2.5).lineTo(cx + 2, cy + 0.5).stroke();
+        doc.moveTo(cx + 7, cy + 2.5).lineTo(cx - 5, cy + 2.5).stroke();
+        doc.moveTo(cx - 2, cy - 0.5).lineTo(cx - 5, cy + 2.5).lineTo(cx - 2, cy + 5.5).stroke();
+        doc.restore();
+      };
+
+      const iconTotal = (cx, cy, color) => {
+        drawCircleBg(cx, cy, 13, color);
+        doc.save().fillColor(color).fontSize(15).font("Helvetica-Bold")
+          .text("Σ", cx - 5.5, cy - 8.5, { lineBreak: false });
+        doc.restore();
+      };
+
+      const iconGastos = (cx, cy, color) => {
+        drawCircleBg(cx, cy, 13, color);
+        doc.save().strokeColor(color).lineWidth(1.5);
+        doc.moveTo(cx, cy - 7).lineTo(cx, cy + 4).stroke();
+        doc.moveTo(cx - 4, cy + 1).lineTo(cx, cy + 5).lineTo(cx + 4, cy + 1).stroke();
+        doc.moveTo(cx - 5, cy - 5).lineTo(cx + 5, cy - 5).stroke();
+        doc.restore();
+      };
+
+      const iconNeto = (cx, cy, color) => {
+        drawCircleBg(cx, cy, 13, color);
+        doc.save().strokeColor(color).lineWidth(2);
+        doc.moveTo(cx - 6, cy).lineTo(cx - 1, cy + 5).lineTo(cx + 6, cy - 5).stroke();
+        doc.restore();
+      };
+
+      /* ── HEADER ──────────────────────────────────────────────────
+         Derecha (de arriba a abajo):
+           fecha · usuario · CORTE DE CAJA · folio · plantel
+         → al doblar la hoja quedan visibles fecha y usuario.
+      ─────────────────────────────────────────────────────────── */
+
+      if (!corte.fecha) throw new Error("Corte sin fecha - datos inconsistentes");
 
       const fechaCorte = new Intl.DateTimeFormat("es-MX", {
         timeZone: "America/Mexico_City",
@@ -70,336 +105,152 @@ async function generateCortePDF(corte) {
         month: "long",
         day: "numeric"
       }).format(new Date(corte.fecha));
+      const fechaCorteFormateada = fechaCorte.charAt(0).toUpperCase() + fechaCorte.slice(1);
+      const nombreResponsable = corte.usuario_nombre_completo || "Sin asignar";
 
-      const fechaCorteFormateada =
-        fechaCorte.charAt(0).toUpperCase() + fechaCorte.slice(1);
+      doc.image(logoPath, 50, 50, { width: 70 });
 
-      doc
-        .fontSize(11)
-        .font("Helvetica-Bold")
-        .text(fechaCorteFormateada, 50, 170, {
-          width: 512,
-          align: "right"
-        });
+      // Fecha y usuario ENCIMA del título (para doblez)
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica")
+        .text(fechaCorteFormateada, 200, 50, { align: "right" })
+        .text(nombreResponsable,    200, 62, { align: "right" });
 
-      /* ================= JERARQUÍA VISUAL: QUIÉN ================= */
-      doc
-        .fillColor("#333333")
-        .fontSize(9)
-        .font("Helvetica")
-        .text("RESPONSABLE DEL CORTE", 50, 205);
+      // Título
+      doc.fillColor(COLOR).fontSize(22).font("Helvetica-Bold")
+        .text("CORTE DE CAJA", 200, 76, { align: "right" });
 
-      const nombreResponsable = corte.usuario_nombre_completo || 'Sin asignar';
-      
-      doc
-        .fontSize(11)
-        .font("Helvetica-Bold")
-        .text(nombreResponsable, 50, 220, { width: 512 });
+      // Folio + Plantel debajo del título sin encimarse
+      doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+        .text(`Folio: ${corte.id_corte || "N/A"}`,        200, 106, { align: "right" })
+        .text(`Plantel: ${corte.nombre_plantel || "N/A"}`, 200, 118, { align: "right" });
 
-      /* ================= JERARQUÍA VISUAL: CUÁNTO - DESGLOSE COMPLETO ================= */
-      
-      doc
-        .fillColor("#333333")
-        .fontSize(10)
-        .font("Helvetica-Bold")
-        .text("RESUMEN FINANCIERO", 50, 250);
+      doc.moveTo(50, 140).lineTo(562, 140).lineWidth(1.5).stroke(COLOR);
 
-      const cardsTop = 275;
-      const cardWidth = 157;
-      const cardHeight = 70;
-      const cardGap = 10;
+      /* ── CUANDO · QUIÉN · DÓNDE ──────────────────────────────── */
 
-      // ============ FILA 1: INGRESOS POR MÉTODO ============
-      
-      // Card 1: Tarjeta
-      const card1X = 50;
-      doc
-        .rect(card1X, cardsTop, cardWidth, cardHeight)
-        .lineWidth(2)
-        .fillAndStroke(LIGHT_GRAY, COLOR);
+      const infoY = 155;
 
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text("TARJETA", card1X + 10, cardsTop + 10, { width: cardWidth - 20 });
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("CUANDO", 50, infoY);
+      doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
+        .text(fechaCorteFormateada, 50, infoY + 12, { width: 165 });
 
-      const totalTarjeta = Number(corte.total_tarjeta) || 0;
-      doc
-        .fillColor(COLOR)
-        .fontSize(18)
-        .font("Helvetica-Bold")
-        .text(
-          `$${totalTarjeta.toFixed(2)}`,
-          card1X + 10,
-          cardsTop + 28,
-          { width: cardWidth - 20, align: "right" }
-        );
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("QUIÉN", 230, infoY);
+      doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
+        .text(nombreResponsable, 230, infoY + 12, { width: 165 });
 
-      // Card 2: Transferencia
-      const card2X = card1X + cardWidth + cardGap;
-      doc
-        .rect(card2X, cardsTop, cardWidth, cardHeight)
-        .lineWidth(2)
-        .fillAndStroke(LIGHT_GRAY, COLOR);
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("DÓNDE", 410, infoY);
+      doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
+        .text(corte.nombre_plantel || "N/A", 410, infoY + 12, { width: 145 });
 
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text("TRANSFERENCIA", card2X + 10, cardsTop + 10, { width: cardWidth - 20 });
+      /* ── CUÁNTO — 6 tarjetas ─────────────────────────────────── */
 
-      const totalTransferencia = Number(corte.total_transferencia) || 0;
-      doc
-        .fillColor(COLOR)
-        .fontSize(18)
-        .font("Helvetica-Bold")
-        .text(
-          `$${totalTransferencia.toFixed(2)}`,
-          card2X + 10,
-          cardsTop + 28,
-          { width: cardWidth - 20, align: "right" }
-        );
+      const sectionY = infoY + 52;
+      doc.fillColor("#333333").fontSize(10).font("Helvetica-Bold")
+        .text("CUÁNTO", 50, sectionY);
 
-      // Card 3: Efectivo
-      const card3X = card2X + cardWidth + cardGap;
-      doc
-        .rect(card3X, cardsTop, cardWidth, cardHeight)
-        .lineWidth(2)
-        .fillAndStroke(LIGHT_GRAY, COLOR);
+      const cardsTop = sectionY + 20;
+      const cardW    = 157;
+      const cardH    = 72;
+      const cardGap  = 10;
 
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text("EFECTIVO", card3X + 10, cardsTop + 10, { width: cardWidth - 20 });
+      const drawCard = (x, y, label, amount, cardColor, bgColor, iconFn) => {
+        doc.rect(x, y, cardW, cardH).lineWidth(2).fillAndStroke(bgColor, cardColor);
+        if (iconFn) iconFn(x + 18, y + 22, cardColor);
+        doc.fillColor(GRAY).fontSize(7.5).font("Helvetica")
+          .text(label, x + 10, y + 10, { width: cardW - 20 });
+        doc.fillColor(cardColor).fontSize(17).font("Helvetica-Bold")
+          .text(`$${Number(amount || 0).toFixed(2)}`, x + 10, y + 42,
+                { width: cardW - 20, align: "right" });
+      };
 
-      const totalEfectivo = Number(corte.total_efectivo) || 0;
-      doc
-        .fillColor(COLOR)
-        .fontSize(18)
-        .font("Helvetica-Bold")
-        .text(
-          `$${totalEfectivo.toFixed(2)}`,
-          card3X + 10,
-          cardsTop + 28,
-          { width: cardWidth - 20, align: "right" }
-        );
+      // Fila 1: Tarjeta | Transferencia | Efectivo
+      drawCard(50,                     cardsTop, "TARJETA",       corte.total_tarjeta,       C_TARJETA,       LIGHT_GRAY, iconTarjeta);
+      drawCard(50 + cardW + cardGap,   cardsTop, "TRANSFERENCIA", corte.total_transferencia, C_TRANSFERENCIA, "#FFF6EE",  iconTransferencia);
+      drawCard(50 + (cardW+cardGap)*2, cardsTop, "EFECTIVO",      corte.total_efectivo,      C_EFECTIVO,      "#F0FAF4",  iconEfectivo);
 
-      // ============ FILA 2: TOTAL, GASTOS Y NETO (en orden lógico) ============
-      const row2Top = cardsTop + cardHeight + 15;
+      // Fila 2: Total | Gastos | Neto
+      const row2Top = cardsTop + cardH + 12;
+      drawCard(50,                     row2Top, "TOTAL INGRESOS",  corte.total,               C_TOTAL,  BG_TOTAL,  iconTotal);
+      drawCard(50 + cardW + cardGap,   row2Top, "GASTOS EFECTIVO", corte.gastos_efectivo,     C_GASTOS, BG_GASTOS, iconGastos);
+      drawCard(50 + (cardW+cardGap)*2, row2Top, "EFECTIVO NETO",   corte.total_efectivo_neto, C_NETO,   BG_NETO,   iconNeto);
 
-      // Card 4: Total Ingresos
-      doc
-        .rect(card1X, row2Top, cardWidth, cardHeight)
-        .lineWidth(2)
-        .fillAndStroke(HIGHLIGHT_BG, COLOR);
+      /* ── ANÁLISIS DE RECIBOS ─────────────────────────────────── */
 
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text("TOTAL INGRESOS", card1X + 10, row2Top + 10, { width: cardWidth - 20 });
-
-      const totalIngresos = Number(corte.total) || 0;
-      doc
-        .fillColor(COLOR)
-        .fontSize(18)
-        .font("Helvetica-Bold")
-        .text(
-          `$${totalIngresos.toFixed(2)}`,
-          card1X + 10,
-          row2Top + 28,
-          { width: cardWidth - 20, align: "right" }
-        );
-
-      // Card 5: Gastos en Efectivo
-      const gastosCardX = card1X + cardWidth + cardGap;
-      const totalGastos = Number(corte.gastos_efectivo) || 0;
-      
-      doc
-        .rect(gastosCardX, row2Top, cardWidth, cardHeight)
-        .lineWidth(2)
-        .fillAndStroke("#FFF5F5", "#CC6600");
-
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text("GASTOS EFECTIVO", gastosCardX + 10, row2Top + 10, { width: cardWidth - 20 });
-
-      doc
-        .fillColor("#CC6600")
-        .fontSize(18)
-        .font("Helvetica-Bold")
-        .text(
-          `$${totalGastos.toFixed(2)}`,
-          gastosCardX + 10,
-          row2Top + 28,
-          { width: cardWidth - 20, align: "right" }
-        );
-
-      // Card 6: Efectivo Neto (resultado final)
-      const netoCardX = gastosCardX + cardWidth + cardGap;
-      const efectivoNeto = Number(corte.total_efectivo_neto) || 0;
-      
-      doc
-        .rect(netoCardX, row2Top, cardWidth, cardHeight)
-        .lineWidth(2)
-        .fillAndStroke(LIGHT_GRAY, "#009933");
-
-      doc
-        .fillColor(GRAY)
-        .fontSize(8)
-        .font("Helvetica")
-        .text("EFECTIVO NETO", netoCardX + 10, row2Top + 10, { width: cardWidth - 20 });
-
-      doc
-        .fillColor("#009933")
-        .fontSize(18)
-        .font("Helvetica-Bold")
-        .text(
-          `$${efectivoNeto.toFixed(2)}`,
-          netoCardX + 10,
-          row2Top + 28,
-          { width: cardWidth - 20, align: "right" }
-        );
-
-      // Ajustar siguiente sección
-      const tableLeft = 50;
+      const tableLeft  = 50;
       const tableWidth = 512;
-      let nextSectionTop = row2Top + cardHeight + 30;
+      const tableTop   = row2Top + cardH + 30;
+      const colWidth   = 82;
 
-      /* ================= ESTADO DE RECIBOS ================= */
+      doc.fillColor("#333333").fontSize(10).font("Helvetica-Bold")
+        .text("ANÁLISIS DE RECIBOS", 50, tableTop - 20);
 
-      doc
-        .fillColor("#333333")
-        .fontSize(10)
-        .font("Helvetica-Bold")
-        .text("ANÁLISIS DE RECIBOS", 50, nextSectionTop);
+      doc.rect(tableLeft, tableTop, tableWidth, 22).fill(LIGHT_GRAY);
+      doc.fillColor(COLOR).fontSize(8).font("Helvetica-Bold")
+        .text("ESTADO",    tableLeft + 10,  tableTop + 7, { width: 100 })
+        .text("TARJETA",   tableLeft + 120, tableTop + 7, { width: colWidth, align: "right" })
+        .text("TRANSFER.", tableLeft + 210, tableTop + 7, { width: colWidth, align: "right" })
+        .text("EFECTIVO",  tableLeft + 300, tableTop + 7, { width: colWidth, align: "right" })
+        .text("TOTAL",     tableLeft + 420, tableTop + 7, { width: colWidth, align: "right" });
 
-      // Matriz de recibos
-      const matrixTop = nextSectionTop + 25;
-      const colWidth = 82;
-
-      // Header de matriz
-      doc.rect(tableLeft, matrixTop, tableWidth, 22).fill(LIGHT_GRAY);
-
-      doc
-        .fillColor(COLOR)
-        .fontSize(8)
-        .font("Helvetica-Bold")
-        .text("ESTADO", tableLeft + 10, matrixTop + 7, { width: 100 })
-        .text("TARJETA", tableLeft + 120, matrixTop + 7, { width: colWidth, align: "right" })
-        .text("TRANSFER.", tableLeft + 210, matrixTop + 7, { width: colWidth, align: "right" })
-        .text("EFECTIVO", tableLeft + 300, matrixTop + 7, { width: colWidth, align: "right" })
-        .text("TOTAL", tableLeft + 420, matrixTop + 7, { width: colWidth, align: "right" });
-
-      let matrixY = matrixTop + 30;
+      let matrixY = tableTop + 30;
 
       const drawMatrixRow = (label, rowData, index) => {
-        if (index % 2 === 0) {
+        if (index % 2 === 0)
           doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#FAFBFC");
-        }
 
-        doc
-          .fillColor("#333333")
-          .fontSize(9)
-          .font("Helvetica")
-          .text(label, tableLeft + 10, matrixY, { width: 100 });
-
-        doc
-          .font("Helvetica")
-          .text(`${rowData.Tarjeta || 0}`, tableLeft + 120, matrixY, { width: colWidth, align: "right" })
+        doc.fillColor("#333333").fontSize(9).font("Helvetica")
+          .text(label,                           tableLeft + 10,  matrixY, { width: 100 })
+          .text(`${rowData.Tarjeta || 0}`,       tableLeft + 120, matrixY, { width: colWidth, align: "right" })
           .text(`${rowData.Transferencia || 0}`, tableLeft + 210, matrixY, { width: colWidth, align: "right" })
-          .text(`${rowData.Efectivo || 0}`, tableLeft + 300, matrixY, { width: colWidth, align: "right" });
+          .text(`${rowData.Efectivo || 0}`,      tableLeft + 300, matrixY, { width: colWidth, align: "right" });
 
-        doc
-          .fillColor(COLOR)
-          .font("Helvetica-Bold")
+        doc.fillColor(COLOR).font("Helvetica-Bold")
           .text(`${rowData.total_fila || 0}`, tableLeft + 420, matrixY, { width: colWidth, align: "right" });
 
         doc.font("Helvetica").fillColor("#333333");
         matrixY += 20;
       };
 
-      drawMatrixRow("Emitidos", corte.recibos_matrix?.Emitido || {}, 0);
+      drawMatrixRow("Emitidos",   corte.recibos_matrix?.Emitido   || {}, 0);
       drawMatrixRow("Cancelados", corte.recibos_matrix?.Cancelado || {}, 1);
 
-      // Línea antes de totales
       matrixY += 5;
-      doc
-        .moveTo(tableLeft, matrixY)
-        .lineTo(tableLeft + tableWidth, matrixY)
-        .lineWidth(0.5)
-        .stroke(BORDER_GRAY);
-
+      doc.moveTo(tableLeft, matrixY).lineTo(tableLeft + tableWidth, matrixY)
+        .lineWidth(0.5).stroke(BORDER_GRAY);
       matrixY += 10;
 
-      // Fila de totales
-      doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill(HIGHLIGHT_BG);
-
-      doc
-        .fillColor(COLOR)
-        .fontSize(9)
-        .font("Helvetica-Bold")
-        .text("TOTALES", tableLeft + 10, matrixY, { width: 100 })
-        .text(`${corte.totales_columnas?.Tarjeta || 0}`, tableLeft + 120, matrixY, { width: colWidth, align: "right" })
+      doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#E8F4F8");
+      doc.fillColor(COLOR).fontSize(9).font("Helvetica-Bold")
+        .text("TOTALES",                                 tableLeft + 10,  matrixY, { width: 100 })
+        .text(`${corte.totales_columnas?.Tarjeta || 0}`,       tableLeft + 120, matrixY, { width: colWidth, align: "right" })
         .text(`${corte.totales_columnas?.Transferencia || 0}`, tableLeft + 210, matrixY, { width: colWidth, align: "right" })
-        .text(`${corte.totales_columnas?.Efectivo || 0}`, tableLeft + 300, matrixY, { width: colWidth, align: "right" })
-        .text(`${corte.total_global_recibos || 0}`, tableLeft + 420, matrixY, { width: colWidth, align: "right" });
+        .text(`${corte.totales_columnas?.Efectivo || 0}`,      tableLeft + 300, matrixY, { width: colWidth, align: "right" })
+        .text(`${corte.total_global_recibos || 0}`,            tableLeft + 420, matrixY, { width: colWidth, align: "right" });
 
-      /* ================= FOOTER PROFESIONAL - IGUAL AL RECIBO ================= */
+      /* ── FOOTER ──────────────────────────────────────────────── */
+
+      doc.fillColor(GRAY).fontSize(8).font("Helvetica")
+        .text("Este documento es un comprobante de corte de caja válido.", 50, 690,
+              { align: "center", width: 512 });
+
       const footerY = 750;
 
-      // Barra azul de fondo
-      doc
-        .rect(0, footerY, doc.page.width, 42)
-        .fill(COLOR);
+      // ⚠️ Sin esto PDFKit crea segunda página
+      doc.page.margins.bottom = 0;
 
-      // Línea decorativa superior
-      doc
-        .moveTo(0, footerY)
-        .lineTo(doc.page.width, footerY)
-        .lineWidth(1)
-        .stroke("#FFFFFF");
+      doc.rect(0, footerY, doc.page.width, 42).fill(COLOR);
+      doc.moveTo(0, footerY).lineTo(doc.page.width, footerY)
+        .lineWidth(1).stroke("#FFFFFF");
 
-      // Texto en blanco sobre la barra
       if (corte.razon_social || corte.rfc || corte.ubicacion) {
-        doc
-          .fillColor("#FFFFFF")
-          .fontSize(8)
-          .font("Helvetica");
+        doc.fillColor("#FFFFFF").fontSize(8).font("Helvetica");
 
-        // Razón social (izquierda)
-        if (corte.razon_social) {
-          doc.text(
-            corte.razon_social,
-            50,
-            footerY + 14,
-            { width: 180, align: "left" }
-          );
-        }
-
-        // RFC (centro)
-        if (corte.rfc) {
-          doc.text(
-            `RFC: ${corte.rfc}`,
-            230,
-            footerY + 14,
-            { width: 150, align: "center" }
-          );
-        }
-
-        // Ubicación (derecha)
-        if (corte.ubicacion) {
-          doc.text(
-            corte.ubicacion,
-            380,
-            footerY + 14,
-            { width: 182, align: "right" }
-          );
-        }
+        if (corte.razon_social)
+          doc.text(corte.razon_social, 50, footerY + 14, { width: 180, align: "left" });
+        if (corte.rfc)
+          doc.text(`RFC: ${corte.rfc}`, 230, footerY + 14, { width: 150, align: "center" });
+        if (corte.ubicacion)
+          doc.text(corte.ubicacion, 380, footerY + 14, { width: 182, align: "right" });
       }
 
       doc.end();
@@ -411,6 +262,3 @@ async function generateCortePDF(corte) {
 }
 
 module.exports = { generateCortePDF };
-
-
-

@@ -286,6 +286,8 @@ if (montoAjuste < 0) {
 /* ================= FOOTER PROFESIONAL ================= */
 const footerY = 750; // Posición fija en la parte inferior
 
+doc.page.margins.bottom = 0;
+
 // Barra azul de fondo (siempre se dibuja)
 doc
   .rect(0, footerY, doc.page.width, 42)
