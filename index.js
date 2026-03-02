@@ -1056,8 +1056,10 @@ if (tipo === "corte") {
 
 // Generar PDF de corte
 app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
+
+  const { idcorte, nombrecorte } = req.body;
+
   try {
-    const { idcorte, nombrecorte } = req.body;
 
     if (!idcorte || !nombrecorte) {
       return res.status(400).json({
@@ -1067,20 +1069,37 @@ app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
     }
 
     // ==========================================================
-    // FASE 1: Recalcular dentro de TX
+    // FASE 1: Recalcular dentro de TX + LOCK TÉCNICO
     // ==========================================================
     await executeInTransaction(async (conn) => {
 
       await conn.execute(`CALL sp_recalcular_corte(?)`, [idcorte]);
 
       const [[exists]] = await conn.execute(
-        `SELECT id_corte FROM cortes WHERE id_corte = ? FOR UPDATE`,
+        `
+        SELECT id_corte
+        FROM cortes
+        WHERE id_corte = ?
+          AND (generando_pdf IS NULL OR generando_pdf = 0)
+        FOR UPDATE
+        `,
         [idcorte]
       );
 
       if (!exists) {
-        throw new Error("Corte no encontrado");
+        const err = new Error("Corte no encontrado o ya está en proceso");
+        err.statusCode = 409;
+        throw err;
       }
+
+      await conn.execute(
+        `
+        UPDATE cortes
+        SET generando_pdf = TRUE
+        WHERE id_corte = ?
+        `,
+        [idcorte]
+      );
     });
 
     // ==========================================================
@@ -1106,7 +1125,11 @@ app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
     // FASE 4: Guardar ruta
     // ==========================================================
     await pool.execute(
-      `UPDATE cortes SET ruta_pdf = ?, enimpresion = FALSE WHERE id_corte = ?`,
+      `
+      UPDATE cortes
+      SET ruta_pdf = ?
+      WHERE id_corte = ?
+      `,
       [rutaPdf, idcorte]
     );
 
@@ -1114,9 +1137,31 @@ app.post("/cortes/generar-pdf", requireToken, async (req, res, next) => {
 
   } catch (error) {
     next(error);
+
+  } finally {
+
+    // ==========================================================
+    // LIMPIEZA SIEMPRE (independiente de éxito/error)
+    // ==========================================================
+    try {
+      await pool.execute(
+        `
+        UPDATE cortes
+        SET generando_pdf = FALSE,
+            enimpresion = FALSE
+        WHERE id_corte = ?
+        `,
+        [idcorte]
+      );
+    } catch (cleanupError) {
+      console.error("Error limpiando flags de corte", {
+        idcorte,
+        error: cleanupError.message
+      });
+    }
+
   }
 });
-
 
 
 
