@@ -103,7 +103,7 @@ async function generateCortePDF(corte) {
       const fechaCorteFormateada = fechaCorte.charAt(0).toUpperCase() + fechaCorte.slice(1);
       const nombreResponsable = corte.usuario_nombre_completo || "Sin asignar";
 
-      doc.image(logoPath, 50, 50, { width: 70 });
+      doc.image(logoPath, 50, 55, { width: 75 });
 
       // ✅ FIX 2: Fecha y usuario en NEGRITAS arriba del título
       doc.fillColor(GRAY).fontSize(8).font("Helvetica-Bold")
@@ -123,11 +123,11 @@ async function generateCortePDF(corte) {
         .text(`Folio: ${folioCorto}`,                          200, 122, { align: "right" })
         .text(`Plantel: ${corte.nombre_plantel || "N/A"}`,     200, 134, { align: "right" });
 
-      doc.moveTo(50, 156).lineTo(562, 156).lineWidth(1.5).stroke(COLOR);
+      doc.moveTo(50, 150).lineTo(562, 150).lineWidth(1.5).stroke(COLOR);
 
       /* ── ✅ FIX 4: FECHA · RESPONSABLE · PLANTEL ───────────────── */
 
-      const infoY = 151;
+      const infoY = 162;
 
       doc.fillColor(GRAY).fontSize(8).font("Helvetica").text("FECHA", 50, infoY);
       doc.fillColor("#333333").fontSize(9).font("Helvetica-Bold")
@@ -145,7 +145,7 @@ async function generateCortePDF(corte) {
 
       const sectionY = infoY + 52;
       doc.fillColor("#333333").fontSize(10).font("Helvetica-Bold")
-        .text("CUÁNTO", 50, sectionY);
+        .text("COBRADO", 50, sectionY);
 
       const cardsTop = sectionY + 20;
       const cardW    = 157;
