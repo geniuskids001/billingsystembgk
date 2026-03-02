@@ -112,7 +112,7 @@ async function generateCortePDF(corte) {
 
       // ✅ FIX 2: Título más pequeño (18 en lugar de 22) para que respire
       doc.fillColor(COLOR).fontSize(18).font("Helvetica-Bold")
-        .text("CORTE DE CAJA", 200, 76, { align: "right" });
+        .text("CORTE DE CAJA", 180, 96, { align: "right" });
 
       // Folio abreviado para evitar desbordamiento + Plantel sin encimarse
       const folioCorto = corte.id_corte
@@ -120,10 +120,10 @@ async function generateCortePDF(corte) {
         : "N/A";
 
       doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text(`Folio: ${folioCorto}`,                          200, 102, { align: "right" })
-        .text(`Plantel: ${corte.nombre_plantel || "N/A"}`,     200, 114, { align: "right" });
+        .text(`Folio: ${folioCorto}`,                          200, 122, { align: "right" })
+        .text(`Plantel: ${corte.nombre_plantel || "N/A"}`,     200, 134, { align: "right" });
 
-      doc.moveTo(50, 136).lineTo(562, 136).lineWidth(1.5).stroke(COLOR);
+      doc.moveTo(50, 156).lineTo(562, 156).lineWidth(1.5).stroke(COLOR);
 
       /* ── ✅ FIX 4: FECHA · RESPONSABLE · PLANTEL ───────────────── */
 
@@ -184,7 +184,7 @@ async function generateCortePDF(corte) {
 
       const tableLeft  = 50;
       const tableWidth = 512;
-      const tableTop   = row2Top + cardH + 30;
+      const tableTop   = row2Top + cardH + 50;
       const colWidth   = 82;
 
       doc.fillColor("#333333").fontSize(10).font("Helvetica-Bold")
@@ -201,21 +201,32 @@ async function generateCortePDF(corte) {
       let matrixY = tableTop + 30;
 
       const drawMatrixRow = (label, rowData, index) => {
-        if (index % 2 === 0)
-          doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#FAFBFC");
+  const isEmitido    = label === "Emitidos";
+  const isCancelado  = label === "Cancelados";
 
-        doc.fillColor("#333333").fontSize(9).font("Helvetica")
-          .text(label,                           tableLeft + 10,  matrixY, { width: 100 })
-          .text(`${rowData.Tarjeta || 0}`,       tableLeft + 120, matrixY, { width: colWidth, align: "right" })
-          .text(`${rowData.Transferencia || 0}`, tableLeft + 210, matrixY, { width: colWidth, align: "right" })
-          .text(`${rowData.Efectivo || 0}`,      tableLeft + 300, matrixY, { width: colWidth, align: "right" });
+  // Fondo de fila
+  if (isEmitido) {
+    doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#F0FAF4"); // verde muy suave
+  } else if (isCancelado) {
+    doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#FFF5F5"); // rojo muy suave
+  } else if (index % 2 === 0) {
+    doc.rect(tableLeft, matrixY - 5, tableWidth, 20).fill("#FAFBFC");
+  }
 
-        doc.fillColor(COLOR).font("Helvetica-Bold")
-          .text(`${rowData.total_fila || 0}`, tableLeft + 420, matrixY, { width: colWidth, align: "right" });
+  doc.fillColor("#333333").fontSize(9).font("Helvetica")
+    .text(label,                           tableLeft + 10,  matrixY, { width: 100 })
+    .text(`${rowData.Tarjeta || 0}`,       tableLeft + 120, matrixY, { width: colWidth, align: "right" })
+    .text(`${rowData.Transferencia || 0}`, tableLeft + 210, matrixY, { width: colWidth, align: "right" })
+    .text(`${rowData.Efectivo || 0}`,      tableLeft + 300, matrixY, { width: colWidth, align: "right" });
 
-        doc.font("Helvetica").fillColor("#333333");
-        matrixY += 20;
-      };
+  // Total con color más fuerte según fila
+  const totalColor = isEmitido ? "#1A6B3A" : isCancelado ? "#AA0000" : COLOR;
+  doc.fillColor(totalColor).font("Helvetica-Bold")
+    .text(`${rowData.total_fila || 0}`, tableLeft + 420, matrixY, { width: colWidth, align: "right" });
+
+  doc.font("Helvetica").fillColor("#333333");
+  matrixY += 20;
+};
 
       drawMatrixRow("Emitidos",   corte.recibos_matrix?.Emitido   || {}, 0);
       drawMatrixRow("Cancelados", corte.recibos_matrix?.Cancelado || {}, 1);
