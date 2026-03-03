@@ -10,6 +10,7 @@ module.exports = function sincronizarProductosAlumnoFactory({
     const startTime = Date.now();
 
     try {
+
       const result = await executeInTransaction(async (conn) => {
 
         // ============================================================
@@ -24,7 +25,6 @@ module.exports = function sincronizarProductosAlumnoFactory({
           a.id_plantel_academico,
           a.id_grupo,
           g.id_nivel
-
           FROM alumnos a
           LEFT JOIN grupos g ON g.id_grupo = a.id_grupo
           WHERE a.id_alumno = ?
@@ -43,34 +43,33 @@ module.exports = function sincronizarProductosAlumnoFactory({
 
         console.log(`[SincronizarProductos] Datos del alumno - Plantel: ${plantelActual}, Nivel: ${nivelActual || 'sin grupo'}`);
 
-       // ============================================================
-// 2️⃣ ELIMINAR asignaciones inválidas (SOLO defaults)
-// ============================================================
-console.log(`[SincronizarProductos] Eliminando productos default inválidos para alumno ${id_alumno}`);
+        // ============================================================
+        // 2️⃣ ELIMINAR asignaciones inválidas (SOLO defaults)
+        // ============================================================
+        console.log(`[SincronizarProductos] Eliminando productos default inválidos para alumno ${id_alumno}`);
 
-const [deleteResult] = await conn.execute(
-  `
-  DELETE am
-  FROM alumnos_mensuales am
-  JOIN productos p ON p.id_producto = am.id_producto
-  WHERE am.id_alumno = ?
-    AND p.producto_default = TRUE
-    AND (
-          p.id_plantel != ?
-          OR (
-               p.aplica_nivel IS NOT NULL
-               AND (
-                     ? IS NULL
-                     OR p.aplica_nivel != ?
-                   )
-             )
-        )
-  `,
-  [id_alumno, plantelActual, nivelActual, nivelActual]
-);
+        const [deleteResult] = await conn.execute(
+          `
+          DELETE am
+          FROM alumnos_mensuales am
+          JOIN productos p ON p.id_producto = am.id_producto
+          WHERE am.id_alumno = ?
+            AND p.producto_default = TRUE
+            AND (
+                  p.id_plantel != ?
+                  OR (
+                       p.aplica_nivel IS NOT NULL
+                       AND (
+                             ? IS NULL
+                             OR p.aplica_nivel != ?
+                           )
+                     )
+                )
+          `,
+          [id_alumno, plantelActual, nivelActual, nivelActual]
+        );
 
-console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult.affectedRows}`);
-
+        console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult.affectedRows}`);
 
         // ============================================================
         // 3️⃣ INSERTAR productos default globales
@@ -140,7 +139,6 @@ console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult
       });
 
       const durationMs = Date.now() - startTime;
-      console.log(`[SincronizarProductos] Operación completada en ${durationMs}ms para alumno ${id_alumno}`);
 
       res.json({
         ok: true,
@@ -149,12 +147,39 @@ console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult
       });
 
     } catch (error) {
+
       console.error(`[SincronizarProductos] Error en sincronización para alumno ${id_alumno}:`, {
         message: error.message,
         stack: error.stack,
         duration_ms: Date.now() - startTime
       });
+
       next(error);
+
+    } finally {
+
+      // ============================================================
+      // 🔴 APAGAR FLAG SIEMPRE (éxito o error)
+      // ============================================================
+      if (id_alumno) {
+        try {
+          await pool.execute(
+            `
+            UPDATE alumnos
+            SET sync_productos = 0
+            WHERE id_alumno = ?
+            `,
+            [id_alumno]
+          );
+          console.log(`[SincronizarProductos] Flag sync_productos apagado para alumno ${id_alumno}`);
+        } catch (flagError) {
+          console.error(`[SincronizarProductos] ERROR apagando flag sync_productos`, {
+            id_alumno,
+            message: flagError.message
+          });
+        }
+      }
+
     }
 
   };
