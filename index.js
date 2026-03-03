@@ -411,9 +411,10 @@ async function calculateReciboTotal(conn, reciboId) {
     throw new Error("El recibo no tiene fecha operativa");
   }
   
-  const fecha = new Date(recibo.fecha);
-  const year = fecha.getFullYear();
-  const month = fecha.getMonth() + 1;
+  const fechaStr = recibo.fecha.split(" ")[0]; // "YYYY-MM-DD"
+const [yearStr, monthStr] = fechaStr.split("-");
+const year = Number(yearStr);
+const month = Number(monthStr);
   
   const [detalles] = await conn.execute(
     `SELECT * 

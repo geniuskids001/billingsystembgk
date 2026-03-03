@@ -51,13 +51,23 @@ if (!recibo.fecha_emision) {
   throw new Error("Recibo sin fecha de emisión - datos inconsistentes");
 }
 
+// recibo.fecha_emision viene como string: "YYYY-MM-DD HH:MM:SS"
+const fechaStr = recibo.fecha_emision.split(" ")[0];
+const [year, month, day] = fechaStr.split("-");
+
+// Crear fecha sin parsing implícito
+const fechaLocal = new Date(
+  Number(year),
+  Number(month) - 1,
+  Number(day)
+);
+
 const fechaEmision = new Intl.DateTimeFormat("es-MX", {
-  timeZone: "America/Mexico_City",
   weekday: "long",
   year: "numeric",
   month: "long",
   day: "numeric"
-}).format(new Date(recibo.fecha_emision));
+}).format(fechaLocal);
 
 const fechaEmisionFormateada =
   fechaEmision.charAt(0).toUpperCase() + fechaEmision.slice(1);
