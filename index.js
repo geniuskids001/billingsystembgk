@@ -59,6 +59,7 @@ const config = {
     waitForConnections: true,
     connectionLimit: 10,
     timezone: "America/Mexico_City",
+    dateStrings: true
   },
   gcs: {
     bucket: process.env.GCS_BUCKET,
