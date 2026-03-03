@@ -1,4 +1,77 @@
-module.exports = function generarCargosMensualesFactory({
+async function generarCargosMensualesCore(conn, mes, anio, alumnosList = null) {
+
+  if (mes == null || anio == null) {
+    const [[rowFecha]] = await conn.execute(`
+      SELECT 
+        MONTH(CURDATE()) AS mes,
+        YEAR(CURDATE()) AS anio
+    `);
+
+    mes = rowFecha.mes;
+    anio = rowFecha.anio;
+  }
+
+  mes = Number(mes);
+  anio = Number(anio);
+
+  if (mes < 1 || mes > 12) {
+    throw new Error("Mes inválido");
+  }
+
+  if (anio < 2000 || anio > 2100) {
+    throw new Error("Año inválido");
+  }
+
+  const [executeResult] = await conn.execute(
+    `
+    INSERT INTO alumnos_cargos (
+      id_cargo,
+      id_alumno,
+      id_producto,
+      mes,
+      anio,
+      status_cargo
+    )
+    SELECT 
+      UUID(),
+      am.id_alumno,
+      am.id_producto,
+      ?,
+      ?,
+      'Activo'
+    FROM alumnos_mensuales am
+    JOIN alumnos a ON a.id_alumno = am.id_alumno
+    JOIN productos p ON p.id_producto = am.id_producto
+    JOIN planteles pl ON pl.id_plantel = a.id_plantel_academico
+    WHERE 
+      a.status = 'Activo'
+      AND p.status = 'Activo'
+      AND p.frecuencia = 'Mensual'
+      AND pl.status = 'Activo'
+      ${alumnosList && alumnosList.length > 0 
+        ? `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
+        : ''
+      }
+    ON DUPLICATE KEY UPDATE
+      status_cargo = 'Activo',
+      motivo_cancelacion = NULL,
+      updated_at = NOW()
+    `,
+    [
+      mes,
+      anio,
+      ...(alumnosList && alumnosList.length > 0 ? alumnosList : [])
+    ]
+  );
+
+  return {
+    mes,
+    anio,
+    procesados: executeResult.affectedRows
+  };
+}
+
+function generarCargosMensualesFactory({
   pool,
   executeInTransaction,
   logger
@@ -22,48 +95,6 @@ module.exports = function generarCargosMensualesFactory({
 
         const txStart = Date.now();
 
-        // ============================================================
-        // 1️⃣ Resolver mes y año (default = MySQL Mexico timezone)
-        // ============================================================
-
-        if (mes == null || anio == null) {
-          logger.info("Mes o año no proporcionados, obteniendo desde MySQL (CURDATE Mexico)");
-
-          const [[rowFecha]] = await conn.execute(`
-            SELECT 
-              MONTH(CURDATE()) AS mes,
-              YEAR(CURDATE()) AS anio
-          `);
-
-          mes = rowFecha.mes;
-          anio = rowFecha.anio;
-
-          logger.info("Valores por defecto obtenidos desde MySQL", {
-            mes_calculado: mes,
-            anio_calculado: anio
-          });
-        }
-
-        mes = Number(mes);
-        anio = Number(anio);
-
-        logger.info("Valores de mes y año parseados", {
-          mes_final: mes,
-          anio_final: anio
-        });
-
-        if (mes < 1 || mes > 12) {
-          logger.warn("Validación fallida: mes inválido", { mes });
-          throw new Error("Mes inválido");
-        }
-
-        if (anio < 2000 || anio > 2100) {
-          logger.warn("Validación fallida: año inválido", { anio });
-          throw new Error("Año inválido");
-        }
-
-        logger.info("Preparando generación de cargos mensuales", { mes, anio });
-
         const alumnosList = alumnos
           ? String(alumnos).split(",").map(a => a.trim())
           : null;
@@ -73,80 +104,32 @@ module.exports = function generarCargosMensualesFactory({
           cantidad_alumnos: alumnosList ? alumnosList.length : 'todos'
         });
 
-        logger.info("Ejecutando INSERT SELECT en alumnos_cargos", {
+        logger.info("Ejecutando generarCargosMensualesCore", {
           mes,
           anio,
           filtro_alumnos: alumnosList ? 'aplicado' : 'todos'
         });
 
-        const [executeResult] = await conn.execute(
-          `
-          INSERT INTO alumnos_cargos (
-            id_cargo,
-            id_alumno,
-            id_producto,
-            mes,
-            anio,
-            status_cargo
-          )
-          SELECT 
-            UUID(),
-            am.id_alumno,
-            am.id_producto,
-            ?,
-            ?,
-            'Activo'
-          FROM alumnos_mensuales am
-          JOIN alumnos a 
-            ON a.id_alumno = am.id_alumno
-          JOIN productos p 
-            ON p.id_producto = am.id_producto
-          JOIN planteles pl
-            ON pl.id_plantel = a.id_plantel_academico
-          WHERE 
-            a.status = 'Activo'
-            AND p.status = 'Activo'
-            AND p.frecuencia = 'Mensual'
-            AND pl.status = 'Activo'
-          ${alumnosList && alumnosList.length > 0 
-            ? `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
-            : ''
-          }
-          ON DUPLICATE KEY UPDATE
-            status_cargo = 'Activo',
-            motivo_cancelacion = NULL,
-            updated_at = NOW()
-          `,
-          [
-            mes,
-            anio,
-            ...(alumnosList && alumnosList.length > 0 ? alumnosList : [])
-          ]
+        const coreResult = await generarCargosMensualesCore(
+          conn,
+          mes,
+          anio,
+          alumnosList
         );
 
         const txDuration = Date.now() - txStart;
 
-        logger.info("INSERT SELECT ejecutado en alumnos_cargos", {
-          affectedRows: executeResult.affectedRows,
-          insertId: executeResult.insertId,
-          warningStatus: executeResult.warningStatus,
-          mes,
-          anio,
-          filtro_alumnos: alumnosList ? 'aplicado' : 'todos',
-          tx_duration_ms: txDuration
-        });
-
         logger.info("Transacción interna completada correctamente", {
-          mes,
-          anio,
-          total_procesados: executeResult.affectedRows,
+          mes: coreResult.mes,
+          anio: coreResult.anio,
+          total_procesados: coreResult.procesados,
           tx_duration_ms: txDuration
         });
 
         return {
-          mes,
-          anio,
-          procesados: executeResult.affectedRows,
+          mes: coreResult.mes,
+          anio: coreResult.anio,
+          procesados: coreResult.procesados,
           tx_duration_ms: txDuration
         };
       });
@@ -187,4 +170,7 @@ module.exports = function generarCargosMensualesFactory({
       next(error);
     }
   };
-};
+}
+
+module.exports = generarCargosMensualesFactory;
+module.exports.core = generarCargosMensualesCore;

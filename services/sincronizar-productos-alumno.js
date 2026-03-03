@@ -1,3 +1,5 @@
+const { core: generarCargosMensualesCore } = require("./generar-cargos-mensuales");
+
 module.exports = function sincronizarProductosAlumnoFactory({
   pool,
   executeInTransaction,
@@ -14,13 +16,13 @@ module.exports = function sincronizarProductosAlumnoFactory({
       const result = await executeInTransaction(async (conn) => {
 
         // ============================================================
-        // 1️⃣ Obtener datos actuales del alumno (con lock pesimista)
+        // 1 Obtener datos actuales del alumno (con lock pesimista)
         // ============================================================
         console.log(`[SincronizarProductos] Consultando datos del alumno ${id_alumno} con lock`);
-        
+
         const [[alumno]] = await conn.execute(
           `
-          SELECT 
+          SELECT
           a.id_alumno,
           a.id_plantel_academico,
           a.id_grupo,
@@ -44,9 +46,9 @@ module.exports = function sincronizarProductosAlumnoFactory({
         console.log(`[SincronizarProductos] Datos del alumno - Plantel: ${plantelActual}, Nivel: ${nivelActual || 'sin grupo'}`);
 
         // ============================================================
-        // 2️⃣ ELIMINAR asignaciones inválidas (SOLO defaults)
+        // 2 ELIMINAR asignaciones invalidas (SOLO defaults)
         // ============================================================
-        console.log(`[SincronizarProductos] Eliminando productos default inválidos para alumno ${id_alumno}`);
+        console.log(`[SincronizarProductos] Eliminando productos default invalidos para alumno ${id_alumno}`);
 
         const [deleteResult] = await conn.execute(
           `
@@ -72,10 +74,10 @@ module.exports = function sincronizarProductosAlumnoFactory({
         console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult.affectedRows}`);
 
         // ============================================================
-        // 3️⃣ INSERTAR productos default globales
+        // 3 INSERTAR productos default globales
         // ============================================================
         console.log(`[SincronizarProductos] Insertando productos default globales para alumno ${id_alumno}`);
-        
+
         const [insertGlobalesResult] = await conn.execute(
           `
           INSERT IGNORE INTO alumnos_mensuales (
@@ -83,12 +85,12 @@ module.exports = function sincronizarProductosAlumnoFactory({
             id_alumno,
             id_producto
           )
-          SELECT 
+          SELECT
             UUID(),
             ?,
             p.id_producto
           FROM productos p
-          WHERE 
+          WHERE
             p.id_plantel = ?
             AND p.producto_default = TRUE
             AND p.status = 'Activo'
@@ -101,11 +103,11 @@ module.exports = function sincronizarProductosAlumnoFactory({
         console.log(`[SincronizarProductos] Productos globales insertados/actualizados: ${insertGlobalesResult.affectedRows}`);
 
         // ============================================================
-        // 4️⃣ INSERTAR productos default por nivel
+        // 4 INSERTAR productos default por nivel
         // ============================================================
         if (nivelActual) {
           console.log(`[SincronizarProductos] Insertando productos default para nivel "${nivelActual}"`);
-          
+
           const [insertNivelResult] = await conn.execute(
             `
             INSERT IGNORE INTO alumnos_mensuales (
@@ -113,12 +115,12 @@ module.exports = function sincronizarProductosAlumnoFactory({
               id_alumno,
               id_producto
             )
-            SELECT 
+            SELECT
               UUID(),
               ?,
               p.id_producto
             FROM productos p
-            WHERE 
+            WHERE
               p.id_plantel = ?
               AND p.producto_default = TRUE
               AND p.status = 'Activo'
@@ -127,13 +129,27 @@ module.exports = function sincronizarProductosAlumnoFactory({
             `,
             [id_alumno, plantelActual, nivelActual]
           );
-          
+
           console.log(`[SincronizarProductos] Productos por nivel insertados/actualizados: ${insertNivelResult.affectedRows}`);
         } else {
-          console.log(`[SincronizarProductos] Alumno ${id_alumno} sin grupo/nivel: se omiten productos específicos por nivel`);
+          console.log(`[SincronizarProductos] Alumno ${id_alumno} sin grupo/nivel: se omiten productos especificos por nivel`);
         }
 
-        console.log(`[SincronizarProductos] Sincronización completada exitosamente para alumno ${id_alumno}`);
+        // ============================================================
+        // 5 Generar cargos mensuales usando core compartido
+        // ============================================================
+        console.log(`[SincronizarProductos] Generando cargos mensuales (core) para alumno ${id_alumno}`);
+
+        const coreResult = await generarCargosMensualesCore(
+          conn,
+          null,       // mes -> que el core lo resuelva
+          null,       // anio -> que el core lo resuelva
+          [id_alumno] // solo este alumno
+        );
+
+        console.log(`[SincronizarProductos] Cargos generados/reactivados (core): ${coreResult.procesados}`);
+
+        console.log(`[SincronizarProductos] Sincronizacion completada exitosamente para alumno ${id_alumno}`);
 
         return { ok: true };
       });
@@ -148,7 +164,7 @@ module.exports = function sincronizarProductosAlumnoFactory({
 
     } catch (error) {
 
-      console.error(`[SincronizarProductos] Error en sincronización para alumno ${id_alumno}:`, {
+      console.error(`[SincronizarProductos] Error en sincronizacion para alumno ${id_alumno}:`, {
         message: error.message,
         stack: error.stack,
         duration_ms: Date.now() - startTime
@@ -159,7 +175,7 @@ module.exports = function sincronizarProductosAlumnoFactory({
     } finally {
 
       // ============================================================
-      // 🔴 APAGAR FLAG SIEMPRE (éxito o error)
+      // APAGAR FLAG SIEMPRE (exito o error)
       // ============================================================
       if (id_alumno) {
         try {
