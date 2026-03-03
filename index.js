@@ -191,11 +191,10 @@ function generateCorteId(recibo) {
     throw new Error("El recibo no tiene fecha operativa para generar el corte");
   }
 
-  const date = new Date(recibo.fecha);
-
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+  // recibo.fecha viene como string por dateStrings: true
+  // Ejemplo: "2024-03-02 00:00:00"
+  const fechaStr = recibo.fecha.split(" ")[0]; // "2024-03-02"
+  const [year, month, day] = fechaStr.split("-");
 
   return `${recibo.id_usuario}-${recibo.id_plantel}-${year}${month}${day}`;
 }

@@ -93,14 +93,20 @@ async function generateCortePDF(corte) {
 
       if (!corte.fecha) throw new Error("Corte sin fecha - datos inconsistentes");
 
-      const fechaCorte = new Intl.DateTimeFormat("es-MX", {
-        timeZone: "America/Mexico_City",
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric"
-      }).format(new Date(corte.fecha));
-      const fechaCorteFormateada = fechaCorte.charAt(0).toUpperCase() + fechaCorte.slice(1);
+      // corte.fecha viene como string: "YYYY-MM-DD HH:MM:SS"
+const fechaStr = corte.fecha.split(" ")[0]; // "2024-03-02"
+const [year, month, day] = fechaStr.split("-");
+
+// Crear fecha SIN timezone implícito
+const fechaCorte = new Intl.DateTimeFormat("es-MX", {
+  weekday: "long",
+  year: "numeric",
+  month: "long",
+  day: "numeric"
+}).format(new Date(Number(year), Number(month) - 1, Number(day)));
+
+const fechaCorteFormateada =
+  fechaCorte.charAt(0).toUpperCase() + fechaCorte.slice(1);
       const nombreResponsable = corte.usuario_nombre_completo || "Sin asignar";
 
       doc.image(logoPath, 50, 55, { width: 75 });
