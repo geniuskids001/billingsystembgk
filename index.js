@@ -558,7 +558,7 @@ const month = Number(monthStr);
     recargo = Math.ceil(recargo);
 
     // ✅ 4. Precio final sobre base post beca
-    const montoAjuste = detalle.monto_ajuste_activo
+    const montoAjuste = detalle.ajuste_manual
   ? Number(detalle.monto_ajuste || 0)
   : 0;
     const precioCalculado =
