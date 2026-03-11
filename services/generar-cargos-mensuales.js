@@ -1,4 +1,7 @@
-async function generarCargosMensualesCore(conn, mes, anio, alumnosList = null) {
+async function generarCargosMensualesCore(conn, mes, anio, alumnosList = null, mode = "soft") {
+
+  // fallback seguridad
+  if (!mode) mode = "soft";
 
   if (mes == null || anio == null) {
     const [[rowFecha]] = await conn.execute(`
@@ -22,9 +25,26 @@ async function generarCargosMensualesCore(conn, mes, anio, alumnosList = null) {
     throw new Error("Año inválido");
   }
 
+  // ============================================
+  // SQL dinámico según modo
+  // ============================================
+
+  const insertClause = mode === "hard"
+    ? "INSERT INTO alumnos_cargos"
+    : "INSERT IGNORE INTO alumnos_cargos";
+
+  const duplicateClause = mode === "hard"
+    ? `
+      ON DUPLICATE KEY UPDATE
+        status_cargo = 'Activo',
+        motivo_cancelacion = NULL,
+        updated_at = NOW()
+      `
+    : "";
+
   const [executeResult] = await conn.execute(
     `
-    INSERT INTO alumnos_cargos (
+    ${insertClause} (
       id_cargo,
       id_alumno,
       id_producto,
@@ -52,10 +72,7 @@ async function generarCargosMensualesCore(conn, mes, anio, alumnosList = null) {
         ? `AND am.id_alumno IN (${alumnosList.map(() => '?').join(',')})`
         : ''
       }
-    ON DUPLICATE KEY UPDATE
-      status_cargo = 'Activo',
-      motivo_cancelacion = NULL,
-      updated_at = NOW()
+    ${duplicateClause}
     `,
     [
       mes,
@@ -67,6 +84,7 @@ async function generarCargosMensualesCore(conn, mes, anio, alumnosList = null) {
   return {
     mes,
     anio,
+    mode,
     procesados: executeResult.affectedRows
   };
 }
@@ -77,13 +95,16 @@ function generarCargosMensualesFactory({
   logger
 }) {
   return async function generarCargosMensualesHandler(req, res, next) {
+
     const startTime = Date.now();
-    let { mes, anio, alumnos } = req.body;
+
+    let { mes, anio, alumnos, mode } = req.body;
 
     logger.info("Inicio de generarCargosMensualesHandler", {
       mes_recibido: mes,
       anio_recibido: anio,
       alumnos_recibidos: alumnos,
+      mode_recibido: mode,
       body: req.body
     });
 
@@ -107,6 +128,7 @@ function generarCargosMensualesFactory({
         logger.info("Ejecutando generarCargosMensualesCore", {
           mes,
           anio,
+          mode,
           filtro_alumnos: alumnosList ? 'aplicado' : 'todos'
         });
 
@@ -114,7 +136,8 @@ function generarCargosMensualesFactory({
           conn,
           mes,
           anio,
-          alumnosList
+          alumnosList,
+          mode
         );
 
         const txDuration = Date.now() - txStart;
@@ -122,6 +145,7 @@ function generarCargosMensualesFactory({
         logger.info("Transacción interna completada correctamente", {
           mes: coreResult.mes,
           anio: coreResult.anio,
+          mode: coreResult.mode,
           total_procesados: coreResult.procesados,
           tx_duration_ms: txDuration
         });
@@ -129,6 +153,7 @@ function generarCargosMensualesFactory({
         return {
           mes: coreResult.mes,
           anio: coreResult.anio,
+          mode: coreResult.mode,
           procesados: coreResult.procesados,
           tx_duration_ms: txDuration
         };
@@ -139,6 +164,7 @@ function generarCargosMensualesFactory({
       logger.info("Cargos mensuales generados correctamente", {
         mes: result.mes,
         anio: result.anio,
+        mode: result.mode,
         procesados: result.procesados,
         tx_duration_ms: result.tx_duration_ms,
         total_duration_ms: duration
@@ -148,6 +174,7 @@ function generarCargosMensualesFactory({
         ok: true,
         mes: result.mes,
         anio: result.anio,
+        mode: result.mode,
         procesados: result.procesados,
         tx_duration_ms: result.tx_duration_ms,
         total_duration_ms: duration
@@ -164,6 +191,7 @@ function generarCargosMensualesFactory({
         mes,
         anio,
         alumnos,
+        mode,
         duration_ms: Date.now() - startTime
       });
 
