@@ -412,9 +412,9 @@ async function calculateReciboTotal(conn, reciboId) {
   }
   
   const fechaStr = recibo.fecha.split(" ")[0]; // "YYYY-MM-DD"
-const [yearStr, monthStr] = fechaStr.split("-");
-const year = Number(yearStr);
-const month = Number(monthStr);
+  const [yearStr, monthStr] = fechaStr.split("-");
+  const year = Number(yearStr);
+  const month = Number(monthStr);
   
   const [detalles] = await conn.execute(
     `SELECT * 
@@ -447,6 +447,16 @@ const month = Number(monthStr);
     let beca = 0;
     
     let reglas;
+
+    // ✅ CAMBIO 2 — Validación obligatoria para productos Mensuales
+    if (
+      detalle.frecuencia_producto === "Mensual" &&
+      (!detalle.mes || !detalle.anio)
+    ) {
+      throw new Error(
+        `ERROR: Producto mensual ${detalle.id_producto} en recibo ${reciboId} no tiene mes o año`
+      );
+    }
     
     if (detalle.frecuencia_producto === "Mensual") {
       let caso = "Corriente";
@@ -464,6 +474,7 @@ const month = Number(monthStr);
         }
       }
       
+      // ✅ CAMBIO 1 — Lógica de reglas periódicas vs no periódicas (Mensual)
       [reglas] = await conn.execute(
         `
         SELECT rp.*
@@ -475,13 +486,16 @@ const month = Number(monthStr);
         WHERE rp.id_producto = ?
           AND rpfp.forma_pago = ?
           AND rpc.caso = ?
-          AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
-          AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
           AND (
-            rp.es_periodica = 0
-            OR (
+            (
               rp.es_periodica = 1
               AND DAY(?) BETWEEN rp.dia_mes_inicio AND rp.dia_mes_fin
+            )
+            OR
+            (
+              rp.es_periodica = 0
+              AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
+              AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
             )
           )
         ORDER BY rp.prioridad DESC
@@ -496,6 +510,7 @@ const month = Number(monthStr);
         ]
       );
     } else {
+      // ✅ CAMBIO 1 — Lógica de reglas periódicas vs no periódicas (No mensual)
       [reglas] = await conn.execute(
         `
         SELECT rp.*
@@ -504,13 +519,16 @@ const month = Number(monthStr);
           ON rpfp.id_regla = rp.id_regla
         WHERE rp.id_producto = ?
           AND rpfp.forma_pago = ?
-          AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
-          AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
           AND (
-            rp.es_periodica = 0
-            OR (
+            (
               rp.es_periodica = 1
               AND DAY(?) BETWEEN rp.dia_mes_inicio AND rp.dia_mes_fin
+            )
+            OR
+            (
+              rp.es_periodica = 0
+              AND (rp.fecha_inicio IS NULL OR rp.fecha_inicio <= ?)
+              AND (rp.fecha_fin IS NULL OR rp.fecha_fin >= ?)
             )
           )
         ORDER BY rp.prioridad DESC
@@ -523,6 +541,29 @@ const month = Number(monthStr);
           recibo.fecha
         ]
       );
+    }
+
+    // ✅ CAMBIO 3 — Validación de integridad de reglas
+    for (const regla of reglas) {
+      if (regla.es_periodica) {
+        if (
+          regla.dia_mes_inicio == null ||
+          regla.dia_mes_fin == null
+        ) {
+          throw new Error(
+            `ERROR CONFIGURACION: Regla ${regla.id_regla} es periódica pero no tiene dia_mes_inicio o dia_mes_fin`
+          );
+        }
+      } else {
+        if (
+          regla.fecha_inicio == null &&
+          regla.fecha_fin == null
+        ) {
+          throw new Error(
+            `ERROR CONFIGURACION: Regla ${regla.id_regla} no es periódica pero no tiene fecha_inicio ni fecha_fin`
+          );
+        }
+      }
     }
 
     // ✅ 1. Calcular beca primero
@@ -559,8 +600,8 @@ const month = Number(monthStr);
 
     // ✅ 4. Precio final sobre base post beca
     const montoAjuste = detalle.ajuste_manual
-  ? Number(detalle.monto_ajuste || 0)
-  : 0;
+      ? Number(detalle.monto_ajuste || 0)
+      : 0;
     const precioCalculado =
       basePostBeca - descuento + recargo + montoAjuste;
     const precioFinal = Math.max(0, Math.ceil(precioCalculado));
@@ -591,7 +632,6 @@ const month = Number(monthStr);
   
   return { reciboId, total: totalRecibo };
 }
-
 /* ================= ENDPOINTS ================= */
 
 app.post("/cargos/cancelar", requireToken, cancelarCargosHandler);
