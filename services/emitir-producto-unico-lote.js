@@ -9,27 +9,44 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 // ─── 1. VALIDACIÓN DE INPUT ──────────────────────────────────────────────────
 
-function validateInput({ id_producto, id_lote, id_alumnos }) {
+function validateInput({ id_producto, id_lote, id_alumnos, id_usuario, id_plantel }) {
+
   if (!id_producto || typeof id_producto !== 'string' || !id_producto.trim()) {
     const err = new Error('id_producto es requerido');
     err.statusCode = 400;
     throw err;
   }
+
   if (!id_lote || !UUID_REGEX.test(id_lote)) {
     const err = new Error('id_lote debe ser un UUID válido');
     err.statusCode = 400;
     throw err;
   }
+
+  if (!id_usuario || typeof id_usuario !== 'string') {
+    const err = new Error('id_usuario requerido');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!id_plantel || typeof id_plantel !== 'string') {
+    const err = new Error('id_plantel requerido');
+    err.statusCode = 400;
+    throw err;
+  }
+
   if (!Array.isArray(id_alumnos) || id_alumnos.length === 0) {
     const err = new Error('id_alumnos debe ser un array no vacío');
     err.statusCode = 400;
     throw err;
   }
+
   if (id_alumnos.length > 500) {
     const err = new Error('Lote demasiado grande: máximo 500 alumnos por lote');
     err.statusCode = 400;
     throw err;
   }
+
   if (!id_alumnos.every(id => typeof id === 'string' && id.trim())) {
     const err = new Error('Todos los elementos de id_alumnos deben ser strings válidos');
     err.statusCode = 400;
@@ -62,7 +79,22 @@ function validateProducto(producto, id_producto) {
 // REGLA: Esta función SIEMPRE se llama dentro de executeInTransaction().
 // No ejecutar fuera de una transacción.
 
-async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario }) {
+async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel }) {
+
+  // ─── PROTECCIÓN IDEMPOTENTE DEL LOTE ───────────────────────────
+  const [[existeLote]] = await conn.execute(
+    `SELECT 1
+     FROM recibos
+     WHERE id_lote = ?
+     LIMIT 1`,
+    [id_lote]
+  );
+
+  if (existeLote) {
+    const err = new Error(`El lote ${id_lote} ya fue procesado`);
+    err.statusCode = 409;
+    throw err;
+  }
 
   // 3a. Validar y bloquear producto
   const [[producto]] = await conn.execute(
@@ -108,7 +140,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   const reciboValues = recibos.flatMap(({ id_recibo, id_alumno, alumno }) => [
     id_recibo,
     id_alumno,
-    alumno.id_plantel_academico,   // id_plantel  (mismo que id_plantel_academico)
+    id_plantel,   // id_plantel  (plantelde cobro que viene en el body)
     alumno.id_plantel_academico,   // id_plantel_academico
     alumno.id_grupo,
     id_usuario,
@@ -201,8 +233,7 @@ async function emitirRecibosLote(pool, emitirRecibo, idsRecibos) {
 module.exports = function emitirProductoUnicoLoteFactory({ pool, executeInTransaction, emitirRecibo }) {
 
   return async function emitirProductoUnicoLote(req, res, next) {
-   let { id_producto, id_lote, id_alumnos } = req.body;
-
+   let { id_producto, id_lote, id_alumnos, id_usuario, id_plantel } = req.body;
 // Soporte para EnumList de AppSheet (string separado por comas)
 if (typeof id_alumnos === 'string') {
   id_alumnos = id_alumnos
@@ -211,27 +242,28 @@ if (typeof id_alumnos === 'string') {
     .filter(Boolean);
 }
 
-    // Validar input
-    try {
-      validateInput({ id_producto, id_lote, id_alumnos });
-    } catch (err) {
-      return res.status(err.statusCode || 400).json({ error: err.message });
-    }
+   // Validar input
+try {
+  validateInput({ id_producto, id_lote, id_alumnos, id_usuario, id_plantel });
+} catch (err) {
+  return res.status(err.statusCode || 400).json({ error: err.message });
+}
 
-    // Validar sesión
-    if (!req.user?.id_usuario) {
-      return res.status(401).json({ error: 'Usuario no autenticado' });
-    }
 
-    const id_usuario = req.user.id_usuario;
 
-    console.log('[lote] Inicio', { lote_id: id_lote, producto: id_producto, cantidad_alumnos: id_alumnos.length });
+    console.log('[lote] Inicio', {
+  lote_id: id_lote,
+  producto: id_producto,
+  usuario: id_usuario,
+  plantel: id_plantel,
+  cantidad_alumnos: id_alumnos.length
+});
 
     try {
 
       // ── FASE 1: Crear borradores en una única transacción ──────────────────
       const idsRecibos = await executeInTransaction(conn =>
-        crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario })
+        crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel })
       );
 
       console.log(`[lote] Borradores creados — lote=${id_lote} cantidad=${idsRecibos.length}`);
