@@ -1,52 +1,39 @@
 'use strict';
 
-// POST /recibos/emitir-producto-unico/lote
+// POST /recibos/producto-unico/lote
 
 const pLimit = require('p-limit');
 const crypto = require('crypto');
-
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ─── 1. VALIDACIÓN DE INPUT ──────────────────────────────────────────────────
 
-function validateInput({ id_producto, id_lote, id_alumnos, id_usuario, id_plantel }) {
-
+function validateInput({ id_producto, id_lote, id_alumnos, id_plantel }) {
   if (!id_producto || typeof id_producto !== 'string' || !id_producto.trim()) {
     const err = new Error('id_producto es requerido');
     err.statusCode = 400;
     throw err;
   }
-
   if (!id_lote || !UUID_REGEX.test(id_lote)) {
     const err = new Error('id_lote debe ser un UUID válido');
     err.statusCode = 400;
     throw err;
   }
-
-  if (!id_usuario || typeof id_usuario !== 'string') {
-    const err = new Error('id_usuario requerido');
-    err.statusCode = 400;
-    throw err;
-  }
-
   if (!id_plantel || typeof id_plantel !== 'string') {
     const err = new Error('id_plantel requerido');
     err.statusCode = 400;
     throw err;
   }
-
   if (!Array.isArray(id_alumnos) || id_alumnos.length === 0) {
     const err = new Error('id_alumnos debe ser un array no vacío');
     err.statusCode = 400;
     throw err;
   }
-
   if (id_alumnos.length > 500) {
     const err = new Error('Lote demasiado grande: máximo 500 alumnos por lote');
     err.statusCode = 400;
     throw err;
   }
-
   if (!id_alumnos.every(id => typeof id === 'string' && id.trim())) {
     const err = new Error('Todos los elementos de id_alumnos deben ser strings válidos');
     err.statusCode = 400;
@@ -81,21 +68,6 @@ function validateProducto(producto, id_producto) {
 
 async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel }) {
 
-  // ─── PROTECCIÓN IDEMPOTENTE DEL LOTE ───────────────────────────
-  const [[existeLote]] = await conn.execute(
-    `SELECT 1
-     FROM recibos
-     WHERE id_lote = ?
-     LIMIT 1`,
-    [id_lote]
-  );
-
-  if (existeLote) {
-    const err = new Error(`El lote ${id_lote} ya fue procesado`);
-    err.statusCode = 409;
-    throw err;
-  }
-
   // 3a. Validar y bloquear producto
   const [[producto]] = await conn.execute(
     `SELECT id_producto, frecuencia, status
@@ -109,7 +81,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   // 3b. Obtener todos los alumnos en una sola query
   const placeholders = id_alumnos.map(() => '?').join(', ');
   const [alumnos] = await conn.execute(
-    `SELECT id_alumno, id_grupo
+    `SELECT id_alumno, id_plantel_academico, id_grupo
      FROM alumnos
      WHERE id_alumno IN (${placeholders})`,
     id_alumnos
@@ -117,21 +89,34 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
 
   // 3c. Verificar que todos los alumnos existen
   if (alumnos.length !== id_alumnos.length) {
-    const encontrados = new Set(alumnos.map(a => a.id_alumno));
-    const faltantes   = id_alumnos.filter(id => !encontrados.has(id));
+    const encontrados = new Set(alumnos.map(a => a.id_alumno.toLowerCase()));
+    const faltantes   = id_alumnos.filter(id => !encontrados.has(id.toLowerCase()));
     const err = new Error(`Alumnos no encontrados: ${faltantes.join(', ')}`);
     err.statusCode = 404;
     throw err;
   }
 
-  const alumnosMap = new Map(alumnos.map(a => [a.id_alumno, a]));
+  // Normalizar claves a lowercase para que el Map sea case-insensitive.
+  // AppSheet puede enviar UUIDs en uppercase; MySQL siempre devuelve lowercase.
+  // Sin esto, alumnosMap.get(id_alumno) devuelve undefined → mysql2 omite
+  // el valor en el array de parámetros → desplazamiento de columnas en el INSERT.
+  const alumnosMap = new Map(alumnos.map(a => [a.id_alumno.toLowerCase(), a]));
 
   // 3d. Generar UUIDs para los recibos
   const recibos = id_alumnos.map(id_alumno => ({
     id_recibo : crypto.randomUUID(),
-    id_alumno,
-    alumno    : alumnosMap.get(id_alumno),
+    id_alumno : id_alumno.toLowerCase(),                    // normalizar antes del INSERT
+    alumno    : alumnosMap.get(id_alumno.toLowerCase()),
   }));
+
+  // Guard: nunca debe llegar aquí con id_alumno inválido, pero si ocurre
+  // cortamos antes del bulk INSERT para evitar el error de MySQL.
+  const invalidos = recibos.filter(r => !r.id_alumno || !r.alumno);
+  if (invalidos.length > 0) {
+    const err = new Error(`id_alumno sin mapeo: ${invalidos.map(r => r.id_alumno).join(', ')}`);
+    err.statusCode = 500;
+    throw err;
+  }
 
   // 3e. Bulk INSERT recibos
   //     Cada fila: (id_recibo, id_alumno, id_plantel, id_plantel_academico,
@@ -140,7 +125,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   const reciboValues = recibos.flatMap(({ id_recibo, id_alumno, alumno }) => [
     id_recibo,
     id_alumno,
-    id_plantel,   // id_plantel  (plantelde cobro que viene en el body)
+    id_plantel,   // id_plantel  (plantel de cobro que viene en el body)
     id_plantel,   // id_plantel_academico
     alumno.id_grupo,
     id_usuario,
@@ -178,7 +163,7 @@ async function registrarError(pool, id_recibo, error) {
   try {
     await pool.execute(
       `UPDATE recibos SET error_message = ? WHERE id_recibo = ?`,
-      [String(error.message || error).substring(0,255), id_recibo]
+      [error.message.substring(0, 255), id_recibo]
     );
   } catch (dbError) {
     // No propagar — registrar en log y seguir
@@ -233,31 +218,23 @@ async function emitirRecibosLote(pool, emitirRecibo, idsRecibos) {
 module.exports = function emitirProductoUnicoLoteFactory({ pool, executeInTransaction, emitirRecibo }) {
 
   return async function emitirProductoUnicoLote(req, res, next) {
-   let { id_producto, id_lote, id_alumnos, id_usuario, id_plantel } = req.body;
-// Soporte para EnumList de AppSheet (string separado por comas)
-if (typeof id_alumnos === 'string') {
-  id_alumnos = id_alumnos
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
+    const { id_producto, id_lote, id_alumnos, id_plantel } = req.body;
 
-   // Validar input
-try {
-  validateInput({ id_producto, id_lote, id_alumnos, id_usuario, id_plantel });
-} catch (err) {
-  return res.status(err.statusCode || 400).json({ error: err.message });
-}
+    // Validar input
+    try {
+      validateInput({ id_producto, id_lote, id_alumnos, id_plantel });
+    } catch (err) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
 
+    // Validar sesión
+    if (!req.user?.id_usuario) {
+      return res.status(401).json({ error: 'Usuario no autenticado' });
+    }
 
+    const id_usuario = req.user.id_usuario;
 
-    console.log('[lote] Inicio', {
-  lote_id: id_lote,
-  producto: id_producto,
-  usuario: id_usuario,
-  plantel: id_plantel,
-  cantidad_alumnos: id_alumnos.length
-});
+    console.log('[lote] Inicio', { lote_id: id_lote, producto: id_producto, cantidad_alumnos: id_alumnos.length });
 
     try {
 
