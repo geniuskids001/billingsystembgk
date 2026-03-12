@@ -218,14 +218,22 @@ async function emitirRecibosLote(pool, emitirRecibo, idsRecibos) {
 module.exports = function emitirProductoUnicoLoteFactory({ pool, executeInTransaction, emitirRecibo }) {
 
   return async function emitirProductoUnicoLote(req, res, next) {
-    const { id_producto, id_lote, id_alumnos, id_plantel } = req.body;
+    let { id_producto, id_lote, id_alumnos, id_plantel } = req.body;
 
-    // Validar input
-    try {
-      validateInput({ id_producto, id_lote, id_alumnos, id_plantel });
-    } catch (err) {
-      return res.status(err.statusCode || 400).json({ error: err.message });
-    }
+   // Convertir string de AppSheet a array
+if (typeof id_alumnos === 'string') {
+  id_alumnos = id_alumnos
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+// Validar input
+try {
+  validateInput({ id_producto, id_lote, id_alumnos, id_plantel });
+} catch (err) {
+  return res.status(err.statusCode || 400).json({ error: err.message });
+}
 
     // Validar sesión
     if (!req.user?.id_usuario) {
