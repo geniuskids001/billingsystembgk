@@ -7,6 +7,7 @@ const emitirReciboFactory = require("./services/emitir-recibo");
 const generarCargosMensualesFactory = require("./services/generar-cargos-mensuales");
 const sincronizarProductosAlumnoFactory = require("./services/sincronizar-productos-alumno");
 const cancelarCargosFactory = require("./services/cancelar-cargos");
+const emitirProductoUnicoLoteFactory = require('./services/emitir-producto-unico-lote');
 
 
 
@@ -391,6 +392,11 @@ const cancelarCargosHandler = cancelarCargosFactory({
   logger
 });
 
+const emitirProductoUnicoLote = emitirProductoUnicoLoteFactory({
+  pool,
+  executeInTransaction,
+  emitirRecibo: emitirReciboHandler
+});
 
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
@@ -633,6 +639,13 @@ async function calculateReciboTotal(conn, reciboId) {
   return { reciboId, total: totalRecibo };
 }
 /* ================= ENDPOINTS ================= */
+
+app.post(
+  "/recibos/emitir-producto-unico/lote",
+  requireToken,
+  emitirProductoUnicoLote
+);
+
 
 app.post("/cargos/cancelar", requireToken, cancelarCargosHandler);
 

@@ -32,34 +32,7 @@ async function sincronizarProductosAlumnoCore(conn, id_alumno, logger) {
 
   console.log(`[SincronizarProductos] Datos del alumno - Plantel: ${plantelActual}, Nivel: ${nivelActual || 'sin grupo'}`);
 
-  // ============================================================
-  // 2 ELIMINAR asignaciones invalidas (SOLO defaults)
-  // ============================================================
-  console.log(`[SincronizarProductos] Eliminando productos default invalidos para alumno ${id_alumno}`);
-
-  const [deleteResult] = await conn.execute(
-    `
-    DELETE am
-    FROM alumnos_mensuales am
-    JOIN productos p ON p.id_producto = am.id_producto
-    WHERE am.id_alumno = ?
-      AND p.producto_default = TRUE
-      AND (
-            p.id_plantel != ?
-            OR (
-                 p.aplica_nivel IS NOT NULL
-                 AND (
-                       ? IS NULL
-                       OR p.aplica_nivel != ?
-                     )
-               )
-          )
-    `,
-    [id_alumno, plantelActual, nivelActual, nivelActual]
-  );
-
-  console.log(`[SincronizarProductos] Productos default eliminados: ${deleteResult.affectedRows}`);
-
+  
   // ============================================================
   // 3 INSERTAR productos default globales
   // ============================================================
