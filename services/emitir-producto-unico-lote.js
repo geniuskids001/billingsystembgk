@@ -109,7 +109,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   // 3b. Obtener todos los alumnos en una sola query
   const placeholders = id_alumnos.map(() => '?').join(', ');
   const [alumnos] = await conn.execute(
-    `SELECT id_alumno, id_plantel_academico, id_grupo
+    `SELECT id_alumno, id_grupo
      FROM alumnos
      WHERE id_alumno IN (${placeholders})`,
     id_alumnos
@@ -141,7 +141,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
     id_recibo,
     id_alumno,
     id_plantel,   // id_plantel  (plantelde cobro que viene en el body)
-    alumno.id_plantel_academico,   // id_plantel_academico
+    id_plantel,   // id_plantel_academico
     alumno.id_grupo,
     id_usuario,
     id_lote,
