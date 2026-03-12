@@ -235,14 +235,19 @@ try {
   return res.status(err.statusCode || 400).json({ error: err.message });
 }
 
-    // Validar sesión
-    if (!req.user?.id_usuario) {
-      return res.status(401).json({ error: 'Usuario no autenticado' });
-    }
+const { id_usuario } = req.body;
 
-    const id_usuario = req.user.id_usuario;
+if (!id_usuario) {
+  return res.status(400).json({ error: 'id_usuario requerido' });
+}
 
-    console.log('[lote] Inicio', { lote_id: id_lote, producto: id_producto, cantidad_alumnos: id_alumnos.length });
+   console.log('[lote] Inicio', {
+  lote_id: id_lote,
+  producto: id_producto,
+  usuario: id_usuario,
+  plantel: id_plantel,
+  cantidad_alumnos: id_alumnos.length
+});
 
     try {
 
