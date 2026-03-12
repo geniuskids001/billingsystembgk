@@ -1581,9 +1581,25 @@ if (esRegeneracionConFallback) {
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({ ok: true, status: "healthy", timestamp: new Date().toISOString() });
+
+    res.json({
+      ok: true,
+      status: "healthy",
+      service: "billing-system-bk",
+      version: "lote-endpoint-v1",   // <-- cambia esto cuando despliegues
+      timestamp: new Date().toISOString()
+    });
+
   } catch (error) {
-    res.status(503).json({ ok: false, status: "unhealthy", error: error.message });
+
+    res.status(503).json({
+      ok: false,
+      status: "unhealthy",
+      service: "billing-system-bk",
+      version: "lote-endpoint-v1",
+      error: error.message
+    });
+
   }
 });
 
