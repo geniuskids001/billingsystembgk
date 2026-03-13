@@ -207,15 +207,16 @@ VALUES ${reciboRowPlaceholders}
   await conn.execute(sqlRecibos, reciboValues);
 
   // 3f. Bulk INSERT recibos_detalle — todo con ? sin UUID() ni literales mezclados
-  const filasDetalle = recibos.map(({ id_recibo }) => ({
-    id_detalle          : crypto.randomUUID(),
-    id_recibo,
-    id_producto,
-    frecuencia_producto : 'Unica',
-    cantidad            : 1,
-    precio_base         : producto.precio_base,
-    status_detalle      : 'Borrador',
-  }));
+  const filasDetalle = recibos.map(({ id_recibo, id_alumno }) => ({
+  id_detalle: crypto.randomUUID(),
+  id_recibo,
+  id_alumno,
+  id_producto,
+  frecuencia_producto: 'Unica',
+  cantidad: 1,
+  precio_base: producto.precio_base,
+  status_detalle: 'Borrador',
+}));
 
   const columnasDetalle = [
     'id_detalle',
