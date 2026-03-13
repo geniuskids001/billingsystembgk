@@ -219,14 +219,15 @@ VALUES ${reciboRowPlaceholders}
 }));
 
   const columnasDetalle = [
-    'id_detalle',
-    'id_recibo',
-    'id_producto',
-    'frecuencia_producto',
-    'cantidad',
-    'precio_base',
-    'status_detalle',
-  ];
+  'id_detalle',
+  'id_recibo',
+  'id_alumno',   
+  'id_producto',
+  'frecuencia_producto',
+  'cantidad',
+  'precio_base',
+  'status_detalle',
+];
 
   const detalleRowPlaceholders = filasDetalle
     .map(() => `(${columnasDetalle.map(() => '?').join(', ')})`)
