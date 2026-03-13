@@ -6,12 +6,7 @@ const pLimit = require('p-limit');
 const crypto = require('crypto');
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Timezone México
-const ahoraMexico = () => {
-  const now = new Date();
-  const offsetMs = -6 * 60 * 60 * 1000; // UTC-6 (CST)
-  return new Date(now.getTime() + offsetMs);
-};
+
 
 // ─── 1. VALIDACIÓN DE INPUT ──────────────────────────────────────────────────
 
@@ -145,7 +140,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
 
   // 3e. Bulk INSERT recibos
   //     created_at viene desde JS con timezone México — sin NOW() en el SQL
-  const created_at = ahoraMexico();
+  
 
   const filas = recibos.map(({ id_recibo, id_alumno, alumno }) => ({
     id_recibo,
@@ -158,7 +153,6 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
     status_recibo        : 'Borrador',
     id_lote,
     forma_pago,
-    created_at,
   }));
 
   // Orden fijo de columnas — sin dinámico
@@ -173,7 +167,6 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
     'status_recibo',
     'id_lote',
     'forma_pago',
-    'created_at',
   ];
 
   // Guard: id_alumno nunca puede estar vacío antes del INSERT
@@ -399,12 +392,15 @@ module.exports = function emitirProductoUnicoLoteFactory({ pool, executeInTransa
 
     } catch (err) {
       console.error('[lote][SQL ERROR]', {
-        message   : err.message,
-        code      : err.code,
-        errno     : err.errno,
-        sqlMessage: err.sqlMessage,
-        sqlState  : err.sqlState,
-      });
+  message: err.message,
+  code: err.code,
+  errno: err.errno,
+  sqlMessage: err.sqlMessage,
+  sqlState: err.sqlState,
+  sql: err.sql,
+  parameters: err.parameters,
+  stack: err.stack
+});
       next(err);
     }
   };
