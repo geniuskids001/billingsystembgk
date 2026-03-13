@@ -117,12 +117,21 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
 
   const alumnosMap = new Map(alumnos.map(a => [a.id_alumno.toLowerCase(), a]));
 
+  // ── Debug antes de generar recibos ─────────────────────────────────────
+  console.log('[lote][debug] id_alumnos antes de generar recibos:', id_alumnos);
+
   // 3d. Generar UUIDs para los recibos
   const recibos = id_alumnos.map(id_alumno => ({
     id_recibo : crypto.randomUUID(),
     id_alumno : id_alumno.toLowerCase(),
     alumno    : alumnosMap.get(id_alumno.toLowerCase()),
   }));
+
+  // ── Debug después de generar recibos ───────────────────────────────────
+  console.log('[lote][debug] recibos generados:', recibos.map(r => ({
+    id_recibo: r.id_recibo,
+    id_alumno: r.id_alumno,
+  })));
 
   // Guard
   const invalidos = recibos.filter(r => !r.id_alumno || !r.alumno);
@@ -147,6 +156,38 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
     id_lote,
     forma_pago,                      // forma_pago del body
   ]);
+
+  // ── Debug del INSERT ────────────────────────────────────────────────────
+  console.log('[lote][debug] reciboRowPlaceholder:', reciboRowPlaceholder);
+  console.log('[lote][debug] columnas recibos INSERT:', [
+    'id_recibo',
+    'id_alumno',
+    'id_plantel',
+    'id_plantel_academico',
+    'id_grupo',
+    'id_usuario',
+    'fecha',
+    'status_recibo',
+    'created_at',
+    'id_lote',
+    'forma_pago',
+  ]);
+  console.log('[lote][debug] ejemplo valores fila recibo:', reciboValues.slice(0, 9));
+  console.log('[lote][debug] total valores enviados:', reciboValues.length);
+  console.log('[lote][debug] filas recibos:', recibos.length);
+
+  // ── Validar longitud correcta de valores (derivado del placeholder) ────
+  const valoresPorFila = (reciboRowPlaceholder.match(/\?/g) || []).length;
+
+  if (reciboValues.length !== recibos.length * valoresPorFila) {
+    console.error('[lote][error] mismatch valores INSERT recibos', {
+      recibos       : recibos.length,
+      valores       : reciboValues.length,
+      esperado      : recibos.length * valoresPorFila,
+      valoresPorFila,
+    });
+    throw new Error('Mismatch entre placeholders y valores en INSERT recibos');
+  }
 
   await conn.execute(
     `INSERT INTO recibos (
