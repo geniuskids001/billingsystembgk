@@ -8,7 +8,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 // ─── 1. VALIDACIÓN DE INPUT ──────────────────────────────────────────────────
 
-function validateInput({ id_producto, id_lote, id_alumnos, id_plantel }) {
+function validateInput({ id_producto, id_lote, id_alumnos, id_plantel, forma_pago, fecha }) {
   if (!id_producto || typeof id_producto !== 'string' || !id_producto.trim()) {
     const err = new Error('id_producto es requerido');
     err.statusCode = 400;
@@ -39,6 +39,16 @@ function validateInput({ id_producto, id_lote, id_alumnos, id_plantel }) {
     err.statusCode = 400;
     throw err;
   }
+  if (!forma_pago || typeof forma_pago !== 'string' || !forma_pago.trim()) {
+    const err = new Error('forma_pago es requerido');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!fecha || typeof fecha !== 'string' || !fecha.trim()) {
+    const err = new Error('fecha es requerida');
+    err.statusCode = 400;
+    throw err;
+  }
 }
 
 // ─── 2. VALIDACIÓN DE PRODUCTO ───────────────────────────────────────────────
@@ -66,11 +76,11 @@ function validateProducto(producto, id_producto) {
 // REGLA: Esta función SIEMPRE se llama dentro de executeInTransaction().
 // No ejecutar fuera de una transacción.
 
-async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel }) {
+async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel, forma_pago, fecha }) {
 
-  // 3a. Validar y bloquear producto
+  // 3a. Validar y bloquear producto — ahora trae precio_base
   const [[producto]] = await conn.execute(
-    `SELECT id_producto, frecuencia, status
+    `SELECT id_producto, frecuencia, status, precio_base
      FROM productos
      WHERE id_producto = ?
      FOR UPDATE`,
@@ -78,7 +88,11 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   );
   validateProducto(producto, id_producto);
 
+  console.log('[lote][debug] precio_base del producto:', producto.precio_base);
+
   // 3b. Obtener todos los alumnos en una sola query
+  console.log('[lote][debug] ids que iran al IN():', id_alumnos);
+
   const placeholders = id_alumnos.map(() => '?').join(', ');
   const [alumnos] = await conn.execute(
     `SELECT id_alumno, id_plantel_academico, id_grupo
@@ -87,30 +101,30 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
     id_alumnos
   );
 
+  console.log('[lote][debug] alumnos encontrados en BD:', alumnos.map(a => a.id_alumno));
+  console.log('[lote][debug] cantidad solicitados:', id_alumnos.length);
+  console.log('[lote][debug] cantidad encontrados:', alumnos.length);
+
   // 3c. Verificar que todos los alumnos existen
   if (alumnos.length !== id_alumnos.length) {
     const encontrados = new Set(alumnos.map(a => a.id_alumno.toLowerCase()));
     const faltantes   = id_alumnos.filter(id => !encontrados.has(id.toLowerCase()));
+    console.log('[lote][debug] faltantes:', faltantes);
     const err = new Error(`Alumnos no encontrados: ${faltantes.join(', ')}`);
     err.statusCode = 404;
     throw err;
   }
 
-  // Normalizar claves a lowercase para que el Map sea case-insensitive.
-  // AppSheet puede enviar UUIDs en uppercase; MySQL siempre devuelve lowercase.
-  // Sin esto, alumnosMap.get(id_alumno) devuelve undefined → mysql2 omite
-  // el valor en el array de parámetros → desplazamiento de columnas en el INSERT.
   const alumnosMap = new Map(alumnos.map(a => [a.id_alumno.toLowerCase(), a]));
 
   // 3d. Generar UUIDs para los recibos
   const recibos = id_alumnos.map(id_alumno => ({
     id_recibo : crypto.randomUUID(),
-    id_alumno : id_alumno.toLowerCase(),                    // normalizar antes del INSERT
+    id_alumno : id_alumno.toLowerCase(),
     alumno    : alumnosMap.get(id_alumno.toLowerCase()),
   }));
 
-  // Guard: nunca debe llegar aquí con id_alumno inválido, pero si ocurre
-  // cortamos antes del bulk INSERT para evitar el error de MySQL.
+  // Guard
   const invalidos = recibos.filter(r => !r.id_alumno || !r.alumno);
   if (invalidos.length > 0) {
     const err = new Error(`id_alumno sin mapeo: ${invalidos.map(r => r.id_alumno).join(', ')}`);
@@ -119,32 +133,36 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   }
 
   // 3e. Bulk INSERT recibos
-  //     Cada fila: (id_recibo, id_alumno, id_plantel, id_plantel_academico,
-  //                  id_grupo, id_usuario, fecha, status_recibo, created_at, id_lote)
-  const reciboRowPlaceholder = `(?, ?, ?, ?, ?, ?, CURDATE(), 'Borrador', NOW(), ?)`;
+  //     Columnas: id_recibo, id_alumno, id_plantel, id_plantel_academico,
+  //               id_grupo, id_usuario, fecha, status_recibo, created_at, id_lote, forma_pago
+  const reciboRowPlaceholder = `(?, ?, ?, ?, ?, ?, ?, 'Borrador', NOW(), ?, ?)`;
   const reciboValues = recibos.flatMap(({ id_recibo, id_alumno, alumno }) => [
     id_recibo,
     id_alumno,
-    id_plantel,   // id_plantel  (plantel de cobro que viene en el body)
-    id_plantel,   // id_plantel_academico
+    id_plantel,                      // id_plantel  (plantel de cobro del body)
+    alumno.id_plantel_academico,     // id_plantel_academico (plantel real del alumno)
     alumno.id_grupo,
     id_usuario,
+    fecha,                           // fecha del body, no CURDATE()
     id_lote,
+    forma_pago,                      // forma_pago del body
   ]);
 
   await conn.execute(
     `INSERT INTO recibos (
        id_recibo, id_alumno, id_plantel, id_plantel_academico,
-       id_grupo, id_usuario, fecha, status_recibo, created_at, id_lote
+       id_grupo, id_usuario, fecha, status_recibo, created_at, id_lote, forma_pago
      ) VALUES ${recibos.map(() => reciboRowPlaceholder).join(', ')}`,
     reciboValues
   );
 
-  // 3f. Bulk INSERT recibos_detalle
-  //     Cada fila: (id_detalle, id_recibo, id_producto,
-  //                  frecuencia_producto, cantidad, precio_base, status_detalle)
-  const detalleRowPlaceholder = `(UUID(), ?, ?, 'Unica', 1, 0, 'Borrador')`;
-  const detalleValues = recibos.flatMap(({ id_recibo }) => [id_recibo, id_producto]);
+  // 3f. Bulk INSERT recibos_detalle — precio_base viene del producto
+  const detalleRowPlaceholder = `(UUID(), ?, ?, 'Unica', 1, ?, 'Borrador')`;
+  const detalleValues = recibos.flatMap(({ id_recibo }) => [
+    id_recibo,
+    id_producto,
+    producto.precio_base,            // precio_base del producto, no hardcoded 0
+  ]);
 
   await conn.execute(
     `INSERT INTO recibos_detalle (
@@ -166,7 +184,6 @@ async function registrarError(pool, id_recibo, error) {
       [error.message.substring(0, 255), id_recibo]
     );
   } catch (dbError) {
-    // No propagar — registrar en log y seguir
     console.error(`[lote] No se pudo guardar error_message para recibo ${id_recibo}:`, dbError.message);
   }
 }
@@ -181,9 +198,6 @@ async function limpiarErroresPrevios(pool, id_lote) {
 }
 
 // ─── 6. EMISIÓN DE RECIBOS ───────────────────────────────────────────────────
-//
-// REGLA: emitirRecibo maneja su propia transacción interna.
-//        Si falla un recibo → registrar error y continuar con los demás.
 
 async function emitirRecibosLote(pool, emitirRecibo, idsRecibos) {
   const limit = pLimit(5);
@@ -218,58 +232,94 @@ async function emitirRecibosLote(pool, emitirRecibo, idsRecibos) {
 module.exports = function emitirProductoUnicoLoteFactory({ pool, executeInTransaction, emitirRecibo }) {
 
   return async function emitirProductoUnicoLote(req, res, next) {
-    let { id_producto, id_lote, id_alumnos, id_plantel } = req.body;
 
-   // Convertir string de AppSheet a array
-if (typeof id_alumnos === 'string') {
-  id_alumnos = id_alumnos
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
+    // ── DEBUG: req.body completo y id_alumnos RAW ──────────────────────────
+    console.log('[lote][debug] req.body completo:', JSON.stringify(req.body, null, 2));
+    console.log('[lote][debug] id_alumnos RAW:', req.body.id_alumnos);
+    console.log('[lote][debug] typeof id_alumnos RAW:', typeof req.body.id_alumnos);
+    console.log('[lote][debug] esArray RAW:', Array.isArray(req.body.id_alumnos));
 
-// Validar input
-try {
-  validateInput({ id_producto, id_lote, id_alumnos, id_plantel });
-} catch (err) {
-  return res.status(err.statusCode || 400).json({ error: err.message });
-}
+    let { id_producto, id_lote, id_alumnos, id_plantel, id_usuario, forma_pago, fecha } = req.body;
 
-const { id_usuario } = req.body;
+    // ── Parseo de id_alumnos — caso principal: string CSV de AppSheet ──────
+    if (typeof id_alumnos === 'string') {
+      console.log('[lote][debug] id_alumnos string original:', id_alumnos);
+      console.log('[lote][debug] id_alumnos string length:', id_alumnos.length);
 
-if (!id_usuario) {
-  return res.status(400).json({ error: 'id_usuario requerido' });
-}
+      const parsed = id_alumnos.split(',');
+      console.log('[lote][debug] id_alumnos despues split:', parsed);
+      console.log('[lote][debug] cantidad despues split:', parsed.length);
 
-   console.log('[lote] Inicio', {
-  lote_id: id_lote,
-  producto: id_producto,
-  usuario: id_usuario,
-  plantel: id_plantel,
-  cantidad_alumnos: id_alumnos.length
-});
+      const parsedTrim = parsed.map(s => s.trim());
+      console.log('[lote][debug] id_alumnos despues trim:', parsedTrim);
+
+      id_alumnos = parsedTrim.filter(Boolean);
+      console.log('[lote][debug] id_alumnos final:', id_alumnos);
+      console.log('[lote][debug] cantidad final:', id_alumnos.length);
+      console.log('[lote][debug] ids vacios detectados:', parsedTrim.filter(x => !x));
+
+    } else if (Array.isArray(id_alumnos)) {
+      // Caso secundario: ya llega como array — solo loguearlo
+      console.log('[lote][debug] id_alumnos llego como array:', id_alumnos);
+    }
+
+    // ── Validar input ──────────────────────────────────────────────────────
+    try {
+      validateInput({ id_producto, id_lote, id_alumnos, id_plantel, forma_pago, fecha });
+    } catch (err) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
+
+    if (!id_usuario) {
+      return res.status(400).json({ error: 'id_usuario requerido' });
+    }
+
+    console.log('[lote] Inicio', {
+      lote_id          : id_lote,
+      producto         : id_producto,
+      usuario          : id_usuario,
+      plantel          : id_plantel,
+      forma_pago,
+      fecha,
+      cantidad_alumnos : id_alumnos.length,
+    });
 
     try {
 
-      // ── FASE 1: Crear borradores en una única transacción ──────────────────
+      // ── SELECT previo: verificar si id_lote ya existe — ANTES de la TX ───
+      const [[loteExistente]] = await pool.execute(
+        `SELECT 1 FROM recibos WHERE id_lote = ? LIMIT 1`,
+        [id_lote]
+      );
+      if (loteExistente) {
+        return res.status(409).json({ error: 'El id_lote ya existe en recibos' });
+      }
+
+      // ── FASE 1: Crear borradores en una única transacción ─────────────────
       const idsRecibos = await executeInTransaction(conn =>
-        crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel })
+        crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel, forma_pago, fecha })
       );
 
       console.log(`[lote] Borradores creados — lote=${id_lote} cantidad=${idsRecibos.length}`);
 
-      // ── FASE 2: Limpiar errores previos del lote ───────────────────────────
+      // ── FASE 2: Limpiar errores previos del lote ──────────────────────────
       await limpiarErroresPrevios(pool, id_lote);
 
-      // ── FASE 3: Emitir recibos FUERA de la transacción ────────────────────
+      // ── FASE 3: Emitir recibos FUERA de la transacción ───────────────────
       console.log(`[lote] Iniciando emisión — lote=${id_lote}`);
 
       const { emitidos, fallidos } = await emitirRecibosLote(pool, emitirRecibo, idsRecibos);
 
-      console.log('[lote] Finalizado', { lote_id: id_lote, producto: id_producto, cantidad_alumnos: id_alumnos.length, emitidos, fallidos });
+      console.log('[lote] Finalizado', {
+        lote_id          : id_lote,
+        producto         : id_producto,
+        cantidad_alumnos : id_alumnos.length,
+        emitidos,
+        fallidos,
+      });
 
       return res.json({
-        ok              : true,
+        ok               : true,
         id_lote,
         recibos_generados: idsRecibos.length,
         emitidos,
