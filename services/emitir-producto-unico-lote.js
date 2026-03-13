@@ -78,7 +78,7 @@ function validateProducto(producto, id_producto) {
 
 async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_usuario, id_plantel, forma_pago, fecha }) {
 
-  // 3a. Validar y bloquear producto — ahora trae precio_base
+  // 3a. Validar y bloquear producto — trae precio_base
   const [[producto]] = await conn.execute(
     `SELECT id_producto, frecuencia, status, precio_base
      FROM productos
@@ -141,59 +141,67 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
     throw err;
   }
 
-  // 3e. Bulk INSERT recibos
-  //     Columnas: id_recibo, id_alumno, id_plantel, id_plantel_academico,
-  //               id_grupo, id_usuario, fecha, status_recibo, created_at, id_lote, forma_pago
-  const reciboRowPlaceholder = `(?, ?, ?, ?, ?, ?, ?, 'Borrador', NOW(), ?, ?)`;
-  const reciboValues = recibos.flatMap(({ id_recibo, id_alumno, alumno }) => [
+  // 3e. Bulk INSERT recibos — patrón objeto: sin riesgo de mismatch columnas/valores
+  const filas = recibos.map(({ id_recibo, id_alumno, alumno }) => ({
     id_recibo,
     id_alumno,
-    id_plantel,                      // id_plantel  (plantel de cobro del body)
-    alumno.id_plantel_academico,     // id_plantel_academico (plantel real del alumno)
-    alumno.id_grupo,
+    id_plantel,
+    id_plantel_academico : alumno.id_plantel_academico ?? null,
+    id_grupo             : alumno.id_grupo ?? null,       // puede ser null
     id_usuario,
-    fecha,                           // fecha del body, no CURDATE()
+    fecha,
+    status_recibo        : 'Borrador',
     id_lote,
-    forma_pago,                      // forma_pago del body
-  ]);
+    forma_pago,
+  }));
+
+const columnas = [
+  'id_recibo',
+  'id_alumno',
+  'id_plantel',
+  'id_plantel_academico',
+  'id_grupo',
+  'id_usuario',
+  'fecha',
+  'status_recibo',
+  'id_lote',
+  'forma_pago',
+];
+
+// Guard: id_alumno nunca puede estar vacío antes del INSERT
+for (const f of filas) {
+  if (!f.id_alumno) {
+    throw new Error('id_alumno vacío antes del INSERT');
+  }
+}
+
+  const reciboRowPlaceholders = filas
+    .map(() => `(${columnas.map(() => '?').join(', ')}, NOW())`)
+    .join(', ');
+
+  const reciboValues = filas.flatMap(f => columnas.map(col => f[col] ?? null));
 
   // ── Debug del INSERT ────────────────────────────────────────────────────
-  console.log('[lote][debug] reciboRowPlaceholder:', reciboRowPlaceholder);
-  console.log('[lote][debug] columnas recibos INSERT:', [
-    'id_recibo',
-    'id_alumno',
-    'id_plantel',
-    'id_plantel_academico',
-    'id_grupo',
-    'id_usuario',
-    'fecha',
-    'status_recibo',
-    'created_at',
-    'id_lote',
-    'forma_pago',
-  ]);
-  console.log('[lote][debug] ejemplo valores fila recibo:', reciboValues.slice(0, 9));
+  console.log('[lote][debug] columnas INSERT recibos:', [...columnas, 'created_at']);
+  console.log('[lote][debug] ejemplo valores fila recibo:', reciboValues.slice(0, columnas.length));
   console.log('[lote][debug] total valores enviados:', reciboValues.length);
-  console.log('[lote][debug] filas recibos:', recibos.length);
+  console.log('[lote][debug] filas recibos:', filas.length);
+  console.log('[lote][debug] valoresPorFila:', columnas.length);
 
-  // ── Validar longitud correcta de valores (derivado del placeholder) ────
-  const valoresPorFila = (reciboRowPlaceholder.match(/\?/g) || []).length;
-
-  if (reciboValues.length !== recibos.length * valoresPorFila) {
+  // ── Validar longitud (derivado del objeto, no hardcodeado) ─────────────
+  if (reciboValues.length !== filas.length * columnas.length) {
     console.error('[lote][error] mismatch valores INSERT recibos', {
-      recibos       : recibos.length,
-      valores       : reciboValues.length,
-      esperado      : recibos.length * valoresPorFila,
-      valoresPorFila,
+      filas          : filas.length,
+      valores        : reciboValues.length,
+      esperado       : filas.length * columnas.length,
+      valoresPorFila : columnas.length,
     });
-    throw new Error('Mismatch entre placeholders y valores en INSERT recibos');
+    throw new Error('Mismatch entre columnas y valores en INSERT recibos');
   }
 
   await conn.execute(
-    `INSERT INTO recibos (
-       id_recibo, id_alumno, id_plantel, id_plantel_academico,
-       id_grupo, id_usuario, fecha, status_recibo, created_at, id_lote, forma_pago
-     ) VALUES ${recibos.map(() => reciboRowPlaceholder).join(', ')}`,
+    `INSERT INTO recibos (${columnas.join(', ')}, created_at)
+     VALUES ${reciboRowPlaceholders}`,
     reciboValues
   );
 
@@ -202,7 +210,7 @@ async function crearBorradoresTx(conn, { id_producto, id_lote, id_alumnos, id_us
   const detalleValues = recibos.flatMap(({ id_recibo }) => [
     id_recibo,
     id_producto,
-    producto.precio_base,            // precio_base del producto, no hardcoded 0
+    producto.precio_base,
   ]);
 
   await conn.execute(
@@ -368,6 +376,13 @@ module.exports = function emitirProductoUnicoLoteFactory({ pool, executeInTransa
       });
 
     } catch (err) {
+      console.error('[lote][SQL ERROR]', {
+        message   : err.message,
+        code      : err.code,
+        errno     : err.errno,
+        sqlMessage: err.sqlMessage,
+        sqlState  : err.sqlState,
+      });
       next(err);
     }
   };
