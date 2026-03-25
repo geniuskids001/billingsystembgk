@@ -44,6 +44,7 @@ calculateReciboTotal
         WHERE id_recibo = ?
           AND status_recibo = 'Borrador'
           AND (generando_pdf IS NULL OR generando_pdf = FALSE)
+          AND (calculando IS NULL OR calculando = FALSE)
         FOR UPDATE
         `,
         [id_recibo]
@@ -52,10 +53,31 @@ calculateReciboTotal
       const row = rows[0];
 
       if (!row) {
-        const err = new Error("Recibo no encontrado, no está en Borrador o está siendo procesado");
-        err.statusCode = 409;
-        throw err;
-      }
+
+  // detectar si está calculando
+  const [[calcRow]] = await conn.execute(`
+    SELECT calculando
+    FROM recibos
+    WHERE id_recibo = ?
+  `, [id_recibo]);
+
+  if (calcRow?.calculando) {
+    await conn.execute(`
+      UPDATE recibos
+      SET error_message = 'El recibo se está recalculando. Intente nuevamente.'
+      WHERE id_recibo = ?
+        AND status_recibo = 'Borrador'
+    `, [id_recibo]);
+
+    const err = new Error("Recibo en cálculo");
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const err = new Error("Recibo no disponible para emisión");
+  err.statusCode = 409;
+  throw err;
+}
 
       logger.info("Lock adquirido en recibo para emisión", { 
         id_recibo,
@@ -457,6 +479,14 @@ console.log("DEBUG BEFORE generateReciboPDF", {
       pdf_generado: !!rutaPdf,
       duration_ms: duration
     });
+
+    if (!pdfWarning) {
+  await pool.execute(`
+    UPDATE recibos
+    SET error_message = NULL
+    WHERE id_recibo = ?
+  `, [txResult.id_recibo]);
+}
 
     resultado = {
       ok: true,
