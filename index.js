@@ -180,7 +180,7 @@ async function uploadPdfToGCS(buffer, filepath) {
 
   logger.info("PDF subido a GCS", { filepath, publicUrl });
 
-  return publicUrl;
+  return `gs://${config.gcs.bucket}/${filepath}`;
 }
 
 /* ================= DATE HELPERS ================= */
