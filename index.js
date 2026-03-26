@@ -1622,6 +1622,75 @@ app.get("/health", async (req, res) => {
   }
 });
 
+
+app.get("/assets/logo_recibos.png", (req, res) => {
+  try {
+    const filePath = require("path").join(__dirname, "assets/logo_recibos.png");
+
+    res.set("Content-Type", "image/png");
+    res.set("Cache-Control", "public, max-age=31536000"); // cache 1 año
+
+    res.sendFile(filePath);
+  } catch (err) {
+    res.status(500).send("Error logo");
+  }
+});
+
+
+app.get("/genix-recibos/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const recibo = await getReciboHydrated(id);
+
+    if (!recibo || !recibo.ruta_pdf) {
+      return res.status(404).send("No disponible");
+    }
+
+    // Fecha dd/mm/aa
+    const fechaStr = recibo.fecha.split(" ")[0];
+    const [y, m, d] = fechaStr.split("-");
+    const fechaCorta = `${d}/${m}/${y.slice(2)}`;
+
+    // Logo desde API (no bucket público)
+    const logoUrl = `https://billing-system-bgk-23846829930.us-central1.run.app/assets/logo_recibos.png`;
+
+    // Endpoint seguro (genera signed URL)
+    const urlSeguro = `https://billing-system-bgk-23846829930.us-central1.run.app/pdf/recibo/${id}/ver?token=${config.apiToken}`;
+
+    res.set("Content-Type", "text/html; charset=utf-8");
+
+    res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+
+<meta property="og:title" content="Recibo de pago" />
+<meta property="og:description" content="${recibo.alumno_nombre_completo} (${fechaCorta})" />
+<meta property="og:image" content="${logoUrl}" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://billing-system-bgk-23846829930.us-central1.run.app/genix-recibos/${id}" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+<meta http-equiv="refresh" content="0; url=${urlSeguro}" />
+</head>
+<body>
+Redirigiendo...
+</body>
+</html>`);
+  } catch (error) {
+    logger.error("genix-recibos error", {
+      error: error.message,
+      id: req.params.id
+    });
+    res.status(500).send("Error interno");
+  }
+});
+
+
+
+
 // Error handler (debe ir al final)
 app.use(errorHandler);
 
