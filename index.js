@@ -1624,14 +1624,42 @@ app.get("/health", async (req, res) => {
 
 
 app.get("/assets/logo_recibos.png", (req, res) => {
+  const path = require("path");
+  const fs = require("fs");
+
   try {
-    const filePath = require("path").join(__dirname, "assets/logo_recibos.png");
+    const filePath = path.resolve(__dirname, "assets/logo_recibos.png");
+
+    // 🔍 DEBUG: path calculado
+    console.log("[LOGO] Path:", filePath);
+
+    // 🔍 DEBUG: existe?
+    if (!fs.existsSync(filePath)) {
+      console.error("[LOGO] ❌ NO EXISTE:", filePath);
+
+      return res.status(404).send("Logo no encontrado");
+    }
+
+    // 🔍 DEBUG: stats archivo
+    const stats = fs.statSync(filePath);
+    console.log("[LOGO] ✔ Existe | Size:", stats.size, "bytes");
+
+    // 🔍 DEBUG: tipo archivo
+    if (stats.size === 0) {
+      console.error("[LOGO] ❌ Archivo vacío");
+      return res.status(500).send("Logo vacío");
+    }
 
     res.set("Content-Type", "image/png");
-    res.set("Cache-Control", "public, max-age=31536000"); // cache 1 año
+    res.set("Cache-Control", "public, max-age=31536000");
+
+    console.log("[LOGO] 🚀 Enviando logo...");
 
     res.sendFile(filePath);
+
   } catch (err) {
+    console.error("[LOGO] ❌ ERROR:", err);
+
     res.status(500).send("Error logo");
   }
 });
