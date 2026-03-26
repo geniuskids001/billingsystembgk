@@ -1660,6 +1660,7 @@ app.get("/genix-recibos/:id", async (req, res) => {
 
     res.set("Content-Type", "text/html; charset=utf-8");
 
+    const debug = req.query.debug;
     res.send(`<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1673,7 +1674,7 @@ app.get("/genix-recibos/:id", async (req, res) => {
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-<meta http-equiv="refresh" content="0; url=${urlSeguro}" />
+${debug ? "" : `<meta http-equiv="refresh" content="0; url=${urlSeguro}" />`}
 </head>
 <body>
 Redirigiendo...
