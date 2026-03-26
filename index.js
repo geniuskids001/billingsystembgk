@@ -175,10 +175,12 @@ async function uploadPdfToGCS(buffer, filepath) {
       contentDisposition: `inline; filename="${filepath.split('/').pop()}"`,
     },
   });
-  
-  const gsPath = `gs://${config.gcs.bucket}/${filepath}`;
-  logger.info("PDF subido a GCS", { filepath, gsPath });
-  return gsPath;
+
+  const publicUrl = `https://storage.googleapis.com/${config.gcs.bucket}/${filepath}`;
+
+  logger.info("PDF subido a GCS", { filepath, publicUrl });
+
+  return publicUrl;
 }
 
 /* ================= DATE HELPERS ================= */
@@ -904,13 +906,22 @@ if (reciboParaPdf.status_recibo !== 'Cancelado') {
 
     // Resolver ruta PDF (sobrescritura)
     if (reciboParaPdf.ruta_pdf) {
-      const prefix = `gs://${config.gcs.bucket}/`;
-      rutaPdfFinal = reciboParaPdf.ruta_pdf.startsWith(prefix)
-        ? reciboParaPdf.ruta_pdf.replace(prefix, "")
-        : `recibos/${id_recibo}.pdf`;
-    } else {
-      rutaPdfFinal = `recibos/${id_recibo}.pdf`;
-    }
+
+  if (reciboParaPdf.ruta_pdf.startsWith("https://")) {
+    const prefix = `https://storage.googleapis.com/${config.gcs.bucket}/`;
+    rutaPdfFinal = reciboParaPdf.ruta_pdf.replace(prefix, "");
+
+  } else if (reciboParaPdf.ruta_pdf.startsWith(`gs://${config.gcs.bucket}/`)) {
+    const prefix = `gs://${config.gcs.bucket}/`;
+    rutaPdfFinal = reciboParaPdf.ruta_pdf.replace(prefix, "");
+
+  } else {
+    throw new Error("Formato de ruta_pdf inválido en cancelación");
+  }
+
+} else {
+  rutaPdfFinal = `recibos/${id_recibo}.pdf`;
+}
 
     await deleteFileIfExists(rutaPdfFinal);
     const rutaGs = await uploadPdfToGCS(pdfBuffer, rutaPdfFinal);
@@ -1068,18 +1079,25 @@ if (tipo === "corte") {
     // 4. Validar formato de ruta y extraer path
     // ------------------------------------------------------------------------
     const rutaPdf = row.ruta_pdf;
-    const bucketPrefix = `gs://${config.gcs.bucket}/`;
 
-    if (!rutaPdf.startsWith(bucketPrefix)) {
-      logger.error("Formato de ruta_pdf inválido", { 
-        tipo, 
-        id, 
-        ruta_pdf: rutaPdf 
-      });
-      return res.status(500).send("Error en formato de archivo");
-    }
+// 👉 CASO NUEVO: URL pública
+if (rutaPdf.startsWith("https://")) {
+  return res.redirect(rutaPdf);
+}
 
-    const filePath = rutaPdf.replace(bucketPrefix, "");
+// 👉 CASO LEGACY: gs:// (signed URL)
+const bucketPrefix = `gs://${config.gcs.bucket}/`;
+
+if (!rutaPdf.startsWith(bucketPrefix)) {
+  logger.error("Formato de ruta_pdf inválido", { 
+    tipo, 
+    id, 
+    ruta_pdf: rutaPdf 
+  });
+  return res.status(500).send("Error en formato de archivo");
+}
+
+const filePath = rutaPdf.replace(bucketPrefix, "");
 
     // ------------------------------------------------------------------------
     // 5. Generar signed URL con expiración corta
@@ -1335,29 +1353,31 @@ await executeInTransaction(async (conn) => {
     // FASE 2: RESOLVER RUTA DEL PDF
     // ============================================================
     if (recibo.ruta_pdf) {
-      const bucketPrefix = `gs://${config.gcs.bucket}/`;
-      
-      // Validar que ruta_pdf coincida con bucket configurado
-      if (!recibo.ruta_pdf.startsWith(bucketPrefix)) {
-        throw new Error(
-          "ruta_pdf en BD no coincide con bucket configurado"
-        );
-      }
-      
-      rutaPdfFinal = recibo.ruta_pdf.replace(bucketPrefix, "");
-      
-      // Validar que no tenga path traversal
-      if (rutaPdfFinal.includes('..') || rutaPdfFinal.startsWith('/')) {
-        throw new Error(
-          "ruta_pdf contiene caracteres peligrosos"
-        );
-      }
 
-      logger.info("Usando ruta_pdf existente para sobrescritura", {
-        correlation_id: correlationId,
-        id_recibo: reciboIdSanitized,
-        ruta_pdf: recibo.ruta_pdf
-      });
+  let rutaOriginal = recibo.ruta_pdf;
+
+  if (rutaOriginal.startsWith("https://")) {
+    const prefix = `https://storage.googleapis.com/${config.gcs.bucket}/`;
+    rutaPdfFinal = rutaOriginal.replace(prefix, "");
+
+  } else if (rutaOriginal.startsWith(`gs://${config.gcs.bucket}/`)) {
+    const prefix = `gs://${config.gcs.bucket}/`;
+    rutaPdfFinal = rutaOriginal.replace(prefix, "");
+
+  } else {
+    throw new Error("ruta_pdf en BD no coincide con bucket configurado");
+  }
+
+  // Validar seguridad
+  if (rutaPdfFinal.includes('..') || rutaPdfFinal.startsWith('/')) {
+    throw new Error("ruta_pdf contiene caracteres peligrosos");
+  }
+
+  logger.info("Usando ruta_pdf existente para sobrescritura", {
+    correlation_id: correlationId,
+    id_recibo: reciboIdSanitized,
+    ruta_pdf: recibo.ruta_pdf
+  });
     } else {
       // FALLBACK DETERMINÍSTICO: Si el recibo nunca tuvo PDF o se perdió
       // la referencia, usamos id_recibo para garantizar unicidad.
@@ -1446,73 +1466,72 @@ logger.info("PDF generado en memoria", {
     const rutaGs = await uploadPdfToGCS(pdfBuffer, rutaPdfFinal);
 
     // Validar que GCS retornó ruta válida
-    if (!rutaGs || !rutaGs.startsWith('gs://')) {
-      throw new Error(
-        "Ruta GCS inválida devuelta por uploadPdfToGCS"
-      );
-    }
-
-    logger.info("PDF regenerado y subido correctamente", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      ruta_gs: rutaGs
-    });
-
-    // ============================================================
-    // FASE 5: ACTUALIZAR BD (si era fallback)
-    // ============================================================
-    const esRegeneracionConFallback = !recibo.ruta_pdf;
-
-if (esRegeneracionConFallback) {
-  const [updateResult] = await pool.execute(
-    `
-    UPDATE recibos
-    SET ruta_pdf = ?
-    WHERE id_recibo = ?
-    `,
-    [rutaGs, reciboIdSanitized]
+    if (
+  !rutaGs ||
+  (!rutaGs.startsWith('gs://') && !rutaGs.startsWith('https://'))
+) {
+  throw new Error(
+    "Ruta GCS inválida devuelta por uploadPdfToGCS"
   );
-
-  // 1️⃣ Validar affectedRows
-  if (updateResult.affectedRows !== 1) {
-    logger.error("ERROR CRÍTICO: UPDATE fallback ruta_pdf no afectó filas", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      rutaGs,
-      affectedRows: updateResult.affectedRows
-    });
-
-    throw new Error("No se pudo actualizar ruta_pdf en fallback");
-  }
-
-  // 2️⃣ Validación inmediata contra BD
-  const [[verificacion]] = await pool.execute(
-    `
-    SELECT ruta_pdf
-    FROM recibos
-    WHERE id_recibo = ?
-    `,
-    [reciboIdSanitized]
-  );
-
-  if (!verificacion || verificacion.ruta_pdf !== rutaGs) {
-    logger.error("INCONSISTENCIA: ruta_pdf no coincide después del UPDATE fallback", {
-      correlation_id: correlationId,
-      id_recibo: reciboIdSanitized,
-      esperado: rutaGs,
-      guardado: verificacion?.ruta_pdf
-    });
-
-    throw new Error("Inconsistencia detectada al guardar ruta_pdf (fallback)");
-  }
-
-  logger.info("ruta_pdf actualizada y validada correctamente (fallback)", {
-    correlation_id: correlationId,
-    id_recibo: reciboIdSanitized,
-    ruta_pdf: rutaGs
-  });
 }
 
+    logger.info("PDF regenerado y subido correctamente", {
+  correlation_id: correlationId,
+  id_recibo: reciboIdSanitized,
+  ruta: rutaGs,
+  tipo_ruta: rutaGs.startsWith("https://") ? "public" : "gs"
+});
+
+   // ============================================================
+// FASE 5: ACTUALIZAR BD (SIEMPRE)
+// ============================================================
+const [updateResult] = await pool.execute(
+  `
+  UPDATE recibos
+  SET ruta_pdf = ?
+  WHERE id_recibo = ?
+  `,
+  [rutaGs, reciboIdSanitized]
+);
+
+// 1️⃣ Validar affectedRows
+if (updateResult.affectedRows !== 1) {
+  logger.error("ERROR CRÍTICO: UPDATE ruta_pdf no afectó filas", {
+    correlation_id: correlationId,
+    id_recibo: reciboIdSanitized,
+    rutaGs,
+    affectedRows: updateResult.affectedRows
+  });
+
+  throw new Error("No se pudo actualizar ruta_pdf");
+}
+
+// 2️⃣ Validación inmediata contra BD
+const [[verificacion]] = await pool.execute(
+  `
+  SELECT ruta_pdf
+  FROM recibos
+  WHERE id_recibo = ?
+  `,
+  [reciboIdSanitized]
+);
+
+if (!verificacion || verificacion.ruta_pdf !== rutaGs) {
+  logger.error("INCONSISTENCIA: ruta_pdf no coincide después del UPDATE", {
+    correlation_id: correlationId,
+    id_recibo: reciboIdSanitized,
+    esperado: rutaGs,
+    guardado: verificacion?.ruta_pdf
+  });
+
+  throw new Error("Inconsistencia detectada al guardar ruta_pdf");
+}
+
+logger.info("ruta_pdf actualizada correctamente", {
+  correlation_id: correlationId,
+  id_recibo: reciboIdSanitized,
+  ruta_pdf: rutaGs
+});
 
     const duration = Date.now() - startTime;
 
@@ -1523,7 +1542,7 @@ if (esRegeneracionConFallback) {
       duration_ms: duration,
       pdf_size_kb: (pdfBuffer.length / 1024).toFixed(2),
       status_recibo: recibo.status_recibo,
-      fallback_usado: esRegeneracionConFallback
+      fallback_usado: !recibo.ruta_pdf
     });
 
     res.json({
