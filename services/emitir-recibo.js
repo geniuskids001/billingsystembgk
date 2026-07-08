@@ -288,11 +288,13 @@ await conn.execute(
       const [updateDetalles] = await conn.execute(
         `
         UPDATE recibos_detalle
-        SET status_detalle = 'Emitido'
+        SET
+          status_detalle = 'Emitido',
+          fecha_recibo = ?
         WHERE id_recibo = ?
           AND status_detalle = 'Borrador'
         `,
-        [id_recibo]
+        [row.fecha, id_recibo]
       );
 
       logger.info("Detalles actualizados a Emitido", { 
