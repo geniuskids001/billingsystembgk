@@ -282,25 +282,24 @@ await conn.execute(
         estado_actual: debugRows[0]
       });
 
-      // ────────────────────────────────────────────────────────────────────
-      // 1.10 Actualizar detalles a Emitido
-      // ────────────────────────────────────────────────────────────────────
-      const [updateDetalles] = await conn.execute(
-        `
-        UPDATE recibos_detalle
-        SET
-          status_detalle = 'Emitido',
-          fecha_recibo = ?
-        WHERE id_recibo = ?
-          AND status_detalle = 'Borrador'
-        `,
-        [row.fecha, id_recibo]
-      );
+     // ────────────────────────────────────────────────────────────────────
+// 1.10 Completar fecha del detalle
+// El trigger ya cambia status_detalle a 'Emitido'
+// Conserva la fecha enviada por AppSheet si ya existe
+// ────────────────────────────────────────────────────────────────────
+const [updateFechaDetalles] = await conn.execute(
+  `
+  UPDATE recibos_detalle
+  SET fecha_recibo = ?
+  WHERE id_recibo = ?
+  `,
+  [row.fecha, id_recibo]
+);
 
-      logger.info("Detalles actualizados a Emitido", { 
-        id_recibo,
-        detalles_actualizados: updateDetalles.affectedRows
-      });
+logger.info("Fecha aplicada a detalles emitidos", {
+  id_recibo,
+  detalles_actualizados: updateFechaDetalles.affectedRows
+});
 
       // ────────────────────────────────────────────────────────────────────
       // 1.11 Recalcular corte mediante stored procedure
