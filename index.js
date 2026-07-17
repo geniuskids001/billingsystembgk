@@ -1683,10 +1683,29 @@ app.get("/genix-recibos/:id", async (req, res) => {
     // Logo desde API (no bucket público)
     const logoUrl = `https://billing-system-bgk-23846829930.us-central1.run.app/assets/logo_recibos.png`;
 
-    // Endpoint seguro (genera signed URL)
-    const urlSeguro = `https://billing-system-bgk-23846829930.us-central1.run.app/pdf/recibo/${id}/ver?token=${config.apiToken}`;
+    // Generar acceso temporal al PDF sin exponer el API_TOKEN administrativo.
+let urlSeguro;
+
+if (recibo.ruta_pdf.startsWith("https://")) {
+  urlSeguro = recibo.ruta_pdf;
+} else {
+  const bucketPrefix = `gs://${config.gcs.bucket}/`;
+
+  if (!recibo.ruta_pdf.startsWith(bucketPrefix)) {
+    throw new Error("Formato de ruta_pdf inválido");
+  }
+
+  const filePath = recibo.ruta_pdf.replace(bucketPrefix, "");
+
+  [urlSeguro] = await bucket.file(filePath).getSignedUrl({
+    version: "v4",
+    action: "read",
+    expires: Date.now() + 60 * 1000
+  });
+}
 
     res.set("Content-Type", "text/html; charset=utf-8");
+    res.set("Cache-Control", "no-store");
 
     const debug = req.query.debug;
     res.send(`<!DOCTYPE html>
