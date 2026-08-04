@@ -8,6 +8,7 @@ const generarCargosMensualesFactory = require("./services/generar-cargos-mensual
 const sincronizarProductosAlumnoFactory = require("./services/sincronizar-productos-alumno");
 const cancelarCargosFactory = require("./services/cancelar-cargos");
 const emitirProductoUnicoLoteFactory = require('./services/emitir-producto-unico-lote');
+const crearCuentasAlumnosFactory = require("./modules/monedero/crear-cuentas-alumnos");
 
 
 
@@ -400,6 +401,12 @@ const emitirProductoUnicoLote = emitirProductoUnicoLoteFactory({
   emitirRecibo: emitirReciboHandler
 });
 
+const crearCuentasAlumnosHandler = crearCuentasAlumnosFactory({
+  pool,
+  executeInTransaction,
+  logger
+});
+
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
   const [[recibo]] = await conn.execute(
@@ -641,6 +648,12 @@ async function calculateReciboTotal(conn, reciboId) {
   return { reciboId, total: totalRecibo };
 }
 /* ================= ENDPOINTS ================= */
+// GENIUS BITES / MONEDERO
+app.post(
+  "/monedero/cuentas/alumnos",
+  requireToken,
+  crearCuentasAlumnosHandler
+);
 
 app.post(
   "/recibos/emitir-producto-unico/lote",
@@ -1605,7 +1618,7 @@ app.get("/health", async (req, res) => {
       ok: true,
       status: "healthy",
       service: "billing-system-bk",
-      version: "lote-endpoint-v1",   // <-- cambia esto cuando despliegues
+      version: "lote-version-geniusbites",   // <-- cambia esto cuando despliegues
       timestamp: new Date().toISOString()
     });
 
