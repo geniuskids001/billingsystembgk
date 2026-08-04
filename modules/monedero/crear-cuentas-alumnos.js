@@ -295,10 +295,17 @@ module.exports = function crearCuentasAlumnosFactory({
       }
 
       if (Array.isArray(ids_alumnos)) {
-        idsAlumnos.push(
-          ...ids_alumnos.map((id) => String(id || "").trim())
-        );
-      }
+  idsAlumnos.push(
+    ...ids_alumnos.map((id) => String(id || "").trim())
+  );
+} else if (typeof ids_alumnos === "string") {
+  idsAlumnos.push(
+    ...ids_alumnos
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+}
 
       // Quitar valores vacíos y duplicados
       idsAlumnos = [
