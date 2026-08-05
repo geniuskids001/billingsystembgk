@@ -9,6 +9,7 @@ const sincronizarProductosAlumnoFactory = require("./services/sincronizar-produc
 const cancelarCargosFactory = require("./services/cancelar-cargos");
 const emitirProductoUnicoLoteFactory = require('./services/emitir-producto-unico-lote');
 const crearCuentasAlumnosFactory = require("./modules/monedero/crear-cuentas-alumnos");
+const procesarRecargaReciboFactory = require("./modules/monedero/procesar-recarga-recibo");
 
 
 
@@ -363,6 +364,21 @@ async function getReciboHydrated(id_recibo, conn = pool) {
 
 /* ================= IMPORTS / DEPENDENCIAS EXTERNAS ================= */
 
+const monederoRecargaService = procesarRecargaReciboFactory({
+  pool,
+  executeInTransaction,
+  logger
+});
+
+const procesarRecargaRecibo =
+  monederoRecargaService.procesarRecargaRecibo;
+
+const procesarRecargaReciboHandler =
+  monederoRecargaService.procesarRecargaReciboHandler;
+
+const guardarErrorRecargaRecibo =
+  monederoRecargaService.guardarErrorRecibo;
+
 
 const emitirReciboHandler = emitirReciboFactory({
   pool,
@@ -374,7 +390,9 @@ const emitirReciboHandler = emitirReciboFactory({
   getReciboPdfPath,
   deleteFileIfExists,
   uploadPdfToGCS,
-  calculateReciboTotal 
+  calculateReciboTotal,
+  procesarRecargaRecibo,
+  guardarErrorRecargaRecibo
 });
 
 const generarCargosMensualesHandler = generarCargosMensualesFactory({
@@ -406,6 +424,8 @@ const crearCuentasAlumnosHandler = crearCuentasAlumnosFactory({
   executeInTransaction,
   logger
 });
+
+
 
 /* ================= BUSINESS LOGIC ================= */
 async function calculateReciboTotal(conn, reciboId) {
@@ -653,6 +673,12 @@ app.post(
   "/monedero/cuentas/alumnos",
   requireToken,
   crearCuentasAlumnosHandler
+);
+
+app.post(
+  "/monedero/recargas/procesar",
+  requireToken,
+  procesarRecargaReciboHandler
 );
 
 app.post(

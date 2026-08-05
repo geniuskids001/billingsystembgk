@@ -9,7 +9,9 @@ module.exports = function emitirReciboFactory({
   getReciboPdfPath,
   deleteFileIfExists,
   uploadPdfToGCS,
-calculateReciboTotal
+  calculateReciboTotal,
+  procesarRecargaRecibo,
+  guardarErrorRecargaRecibo
 }) {
 
   return async function emitirReciboHandler(req, res, next) {
@@ -364,6 +366,39 @@ const reciboEmitido = rowsEmitido[0];
     logger.info("Verificación post-commit exitosa", { id_recibo });
 
     // ========================================================================
+// FASE 2.5: PROCESAR RECARGA DE MONEDERO
+// El recibo ya está emitido. Si la recarga falla, el recibo permanece
+// emitido y se guarda un error reintentable para AppSheet.
+// ========================================================================
+try {
+  const resultadoRecarga = await procesarRecargaRecibo(
+    txResult.id_recibo
+  );
+
+  logger.info("Validación de recarga de monedero completada", {
+    id_recibo: txResult.id_recibo,
+    contiene_recarga: resultadoRecarga.contiene_recarga,
+    procesado: resultadoRecarga.procesado,
+    monto: resultadoRecarga.monto || 0
+  });
+} catch (recargaError) {
+  const mensajeRecarga = await guardarErrorRecargaRecibo(
+    txResult.id_recibo,
+    recargaError
+  );
+
+  logger.error("Recibo emitido pero recarga de monedero falló", {
+    id_recibo: txResult.id_recibo,
+    error: mensajeRecarga
+  });
+
+  /*
+   * No lanzamos el error porque el recibo ya fue emitido.
+   * AppSheet podrá mostrar el error y permitir el reintento.
+   */
+}
+
+    // ========================================================================
     // FASE 3: GENERACIÓN DE PDF
     // ========================================================================
   
@@ -482,11 +517,18 @@ console.log("DEBUG BEFORE generateReciboPDF", {
     });
 
     if (!pdfWarning) {
-  await pool.execute(`
+  await pool.execute(
+    `
     UPDATE recibos
     SET error_message = NULL
     WHERE id_recibo = ?
-  `, [txResult.id_recibo]);
+      AND (
+        error_message IS NULL
+        OR error_message NOT LIKE 'Monedero:%'
+      )
+    `,
+    [txResult.id_recibo]
+  );
 }
 
     resultado = {
