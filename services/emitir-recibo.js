@@ -365,37 +365,57 @@ const reciboEmitido = rowsEmitido[0];
 
     logger.info("Verificación post-commit exitosa", { id_recibo });
 
-    // ========================================================================
-// FASE 2.5: PROCESAR RECARGA DE MONEDERO
-// El recibo ya está emitido. Si la recarga falla, el recibo permanece
-// emitido y se guarda un error reintentable para AppSheet.
 // ========================================================================
-try {
-  const resultadoRecarga = await procesarRecargaRecibo(
-    txResult.id_recibo
-  );
+// FASE 2.5: PROCESAR RECARGA SOLO SI EL RECIBO CONTIENE EL PRODUCTO
+// ========================================================================
+const [[recargaAplicable]] = await pool.execute(
+  `
+  SELECT EXISTS (
+    SELECT 1
+    FROM recibos r
+    JOIN monedero_configuracion_plantel mcp
+      ON mcp.id_plantel = COALESCE(
+        r.id_plantel_academico,
+        r.id_plantel
+      )
+     AND mcp.status = 'Activo'
+    JOIN recibos_detalle rd
+      ON rd.id_recibo = r.id_recibo
+     AND rd.id_producto = mcp.id_producto_recarga
+     AND rd.status_detalle = 'Emitido'
+    WHERE r.id_recibo = ?
+      AND r.status_recibo = 'Emitido'
+  ) AS aplica
+  `,
+  [txResult.id_recibo]
+);
 
-  logger.info("Validación de recarga de monedero completada", {
-    id_recibo: txResult.id_recibo,
-    contiene_recarga: resultadoRecarga.contiene_recarga,
-    procesado: resultadoRecarga.procesado,
-    monto: resultadoRecarga.monto || 0
+if (Number(recargaAplicable.aplica) === 1) {
+  try {
+    const resultadoRecarga = await procesarRecargaRecibo(
+      txResult.id_recibo
+    );
+
+    logger.info("Recarga de monedero procesada", {
+      id_recibo: txResult.id_recibo,
+      procesado: resultadoRecarga.procesado,
+      monto: resultadoRecarga.monto || 0
+    });
+  } catch (recargaError) {
+    const mensajeRecarga = await guardarErrorRecargaRecibo(
+      txResult.id_recibo,
+      recargaError
+    );
+
+    logger.error("Recibo emitido pero recarga de monedero falló", {
+      id_recibo: txResult.id_recibo,
+      error: mensajeRecarga
+    });
+  }
+} else {
+  logger.info("Recibo sin producto de recarga", {
+    id_recibo: txResult.id_recibo
   });
-} catch (recargaError) {
-  const mensajeRecarga = await guardarErrorRecargaRecibo(
-    txResult.id_recibo,
-    recargaError
-  );
-
-  logger.error("Recibo emitido pero recarga de monedero falló", {
-    id_recibo: txResult.id_recibo,
-    error: mensajeRecarga
-  });
-
-  /*
-   * No lanzamos el error porque el recibo ya fue emitido.
-   * AppSheet podrá mostrar el error y permitir el reintento.
-   */
 }
 
     // ========================================================================

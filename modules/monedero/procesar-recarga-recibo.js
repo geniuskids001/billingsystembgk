@@ -5,26 +5,48 @@ module.exports = function procesarRecargaReciboFactory({
   executeInTransaction,
   logger
 }) {
-  /**
-   * Procesa todos los detalles de recarga de un recibo.
-   *
-   * Regla:
-   * - Recibe únicamente id_recibo.
-   * - Obtiene alumno, plantel, usuario, cuenta y configuración desde BD.
-   * - Suma todos los precio_final correspondientes al producto de recarga.
-   * - Toda la recarga se registra en una sola transacción.
-   */
+  function crearError(mensaje, statusCode = 400) {
+    const error = new Error(
+      mensaje.startsWith("Monedero:")
+        ? mensaje
+        : `Monedero: ${mensaje}`
+    );
+
+    error.statusCode = statusCode;
+    return error;
+  }
+
+  async function limpiarErrorMonedero(conn, idRecibo) {
+    await conn.execute(
+      `
+      UPDATE recibos
+      SET
+        error_message = CASE
+          WHEN error_message LIKE 'Monedero:%' THEN NULL
+          ELSE error_message
+        END,
+        reintentar_recarga_monedero = 0
+      WHERE id_recibo = ?
+      `,
+      [idRecibo]
+    );
+  }
+
   async function procesarRecargaRecibo(idRecibo) {
-    if (!idRecibo) {
-      const error = new Error("Monedero: id_recibo es requerido");
-      error.statusCode = 400;
-      throw error;
+    const idReciboLimpio = String(idRecibo || "").trim();
+
+    if (!idReciboLimpio) {
+      throw crearError("id_recibo es requerido", 400);
     }
 
+    logger.info("Iniciando procesamiento de recarga", {
+      id_recibo: idReciboLimpio
+    });
+
     return executeInTransaction(async (conn) => {
-      // ============================================================
-      // 1. Bloquear y validar el recibo
-      // ============================================================
+      // =========================================================
+      // 1. Recibo
+      // =========================================================
       const [[recibo]] = await conn.execute(
         `
         SELECT
@@ -38,49 +60,43 @@ module.exports = function procesarRecargaReciboFactory({
         WHERE id_recibo = ?
         FOR UPDATE
         `,
-        [idRecibo]
+        [idReciboLimpio]
       );
 
       if (!recibo) {
-        const error = new Error("Monedero: El recibo no existe");
-        error.statusCode = 404;
-        throw error;
+        throw crearError("El recibo no existe", 404);
       }
 
       if (recibo.status_recibo !== "Emitido") {
-        const error = new Error(
-          "Monedero: El recibo debe estar emitido para acreditar la recarga"
+        throw crearError(
+          "El recibo debe estar emitido para acreditar la recarga",
+          409
         );
-        error.statusCode = 409;
-        throw error;
       }
 
       if (!recibo.id_alumno) {
-        const error = new Error(
-          "Monedero: El recibo no tiene un alumno asignado"
+        throw crearError(
+          "El recibo no tiene un alumno asignado",
+          400
         );
-        error.statusCode = 400;
-        throw error;
       }
 
       const idPlantel =
         recibo.id_plantel_academico || recibo.id_plantel;
 
       if (!idPlantel) {
-        const error = new Error(
-          "Monedero: El recibo no tiene un plantel asignado"
+        throw crearError(
+          "El recibo no tiene un plantel asignado",
+          400
         );
-        error.statusCode = 400;
-        throw error;
       }
 
-      // ============================================================
-      // 2. Obtener configuración activa del plantel
-      // ============================================================
+      // =========================================================
+      // 2. Configuración del plantel
+      // =========================================================
       const [[configuracion]] = await conn.execute(
         `
-        SELECT
-          id_producto_recarga
+        SELECT id_producto_recarga
         FROM monedero_configuracion_plantel
         WHERE id_plantel = ?
           AND status = 'Activo'
@@ -89,25 +105,22 @@ module.exports = function procesarRecargaReciboFactory({
         [idPlantel]
       );
 
-      if (!configuracion) {
-        const error = new Error(
-          "Monedero: El plantel no tiene una configuración activa"
+      if (!configuracion?.id_producto_recarga) {
+        throw crearError(
+          "El plantel no tiene configurado un producto de recarga",
+          409
         );
-        error.statusCode = 409;
-        throw error;
       }
 
-      // ============================================================
-      // 3. Obtener todos los renglones de recarga
-      // ============================================================
-      const [detallesRecarga] = await conn.execute(
+      // =========================================================
+      // 3. Detalles de recarga
+      // =========================================================
+      const [detalles] = await conn.execute(
         `
         SELECT
           id_detalle,
-          id_producto,
           nombre_producto,
-          precio_final,
-          status_detalle
+          precio_final
         FROM recibos_detalle
         WHERE id_recibo = ?
           AND id_producto = ?
@@ -116,38 +129,28 @@ module.exports = function procesarRecargaReciboFactory({
         FOR UPDATE
         `,
         [
-          idRecibo,
+          idReciboLimpio,
           configuracion.id_producto_recarga
         ]
       );
 
-      /*
-       * Esto permite llamar la función desde emitir-recibo aunque el recibo
-       * no contenga una recarga: simplemente no hace nada.
-       */
-      if (detallesRecarga.length === 0) {
-        return {
-          procesado: false,
-          contiene_recarga: false,
-          id_recibo: idRecibo,
-          mensaje: "El recibo no contiene productos de recarga"
-        };
+      if (detalles.length === 0) {
+        throw crearError(
+          "El recibo no contiene detalles emitidos de recarga",
+          409
+        );
       }
 
-      // ============================================================
-      // 4. Validar importes
-      // ============================================================
       let montoTotal = 0;
 
-      for (const detalle of detallesRecarga) {
+      for (const detalle of detalles) {
         const importe = Number(detalle.precio_final);
 
         if (!Number.isFinite(importe) || importe <= 0) {
-          const error = new Error(
-            `Monedero: El detalle ${detalle.id_detalle} tiene un precio_final inválido`
+          throw crearError(
+            `El detalle ${detalle.id_detalle} tiene un precio_final inválido`,
+            400
           );
-          error.statusCode = 400;
-          throw error;
         }
 
         montoTotal += importe;
@@ -155,17 +158,9 @@ module.exports = function procesarRecargaReciboFactory({
 
       montoTotal = Number(montoTotal.toFixed(2));
 
-      if (montoTotal <= 0) {
-        const error = new Error(
-          "Monedero: El importe total de la recarga debe ser mayor a cero"
-        );
-        error.statusCode = 400;
-        throw error;
-      }
-
-      // ============================================================
-      // 5. Evitar procesar dos veces el mismo recibo
-      // ============================================================
+      // =========================================================
+      // 4. Idempotencia
+      // =========================================================
       const [[movimientoExistente]] = await conn.execute(
         `
         SELECT id_movimiento
@@ -174,28 +169,35 @@ module.exports = function procesarRecargaReciboFactory({
           AND tipo_movimiento = 'Recarga'
         LIMIT 1
         `,
-        [idRecibo]
+        [idReciboLimpio]
       );
 
       if (movimientoExistente) {
+        await limpiarErrorMonedero(conn, idReciboLimpio);
+
+        logger.info("Recarga previamente procesada", {
+          id_recibo: idReciboLimpio,
+          id_movimiento: movimientoExistente.id_movimiento
+        });
+
         return {
           procesado: false,
-          contiene_recarga: true,
           duplicado: true,
-          id_recibo: idRecibo,
+          id_recibo: idReciboLimpio,
           id_movimiento: movimientoExistente.id_movimiento,
           mensaje: "La recarga de este recibo ya fue procesada"
         };
       }
 
-      // Protección adicional a nivel de detalle
-      const idsDetalles = detallesRecarga.map(
-        (detalle) => detalle.id_detalle
+      const idsDetalles = detalles.map(
+        ({ id_detalle }) => id_detalle
       );
 
-      const placeholders = idsDetalles.map(() => "?").join(",");
+      const placeholders = idsDetalles
+        .map(() => "?")
+        .join(",");
 
-      const [detallesProcesados] = await conn.execute(
+      const [detallesExistentes] = await conn.execute(
         `
         SELECT id_detalle_recibo_origen
         FROM monedero_movimiento_detalles
@@ -205,17 +207,16 @@ module.exports = function procesarRecargaReciboFactory({
         idsDetalles
       );
 
-      if (detallesProcesados.length > 0) {
-        const error = new Error(
-          "Monedero: Uno de los detalles de recarga ya fue procesado"
+      if (detallesExistentes.length > 0) {
+        throw crearError(
+          "Uno de los detalles de recarga ya fue procesado",
+          409
         );
-        error.statusCode = 409;
-        throw error;
       }
 
-      // ============================================================
-      // 6. Obtener la cuenta activa del alumno
-      // ============================================================
+      // =========================================================
+      // 5. Cuenta
+      // =========================================================
       const [[cuenta]] = await conn.execute(
         `
         SELECT
@@ -234,46 +235,42 @@ module.exports = function procesarRecargaReciboFactory({
       );
 
       if (!cuenta) {
-        const error = new Error(
-          "Monedero: El alumno no tiene una cuenta asignada"
+        throw crearError(
+          "El alumno no tiene una cuenta asignada",
+          409
         );
-        error.statusCode = 409;
-        throw error;
       }
 
       if (cuenta.status_relacion !== "Activo") {
-        const error = new Error(
-          "Monedero: La relación del alumno con la cuenta está inactiva"
+        throw crearError(
+          "La relación del alumno con la cuenta está inactiva",
+          409
         );
-        error.statusCode = 409;
-        throw error;
       }
 
       if (cuenta.status_cuenta !== "Activo") {
-        const error = new Error(
-          "Monedero: La cuenta del alumno está inactiva"
+        throw crearError(
+          "La cuenta del alumno está inactiva",
+          409
         );
-        error.statusCode = 409;
-        throw error;
       }
 
       const saldoAnterior = Number(cuenta.saldo_actual);
 
       if (!Number.isFinite(saldoAnterior)) {
-        const error = new Error(
-          "Monedero: El saldo actual de la cuenta es inválido"
+        throw crearError(
+          "El saldo actual de la cuenta es inválido",
+          500
         );
-        error.statusCode = 500;
-        throw error;
       }
 
       const saldoPosterior = Number(
         (saldoAnterior + montoTotal).toFixed(2)
       );
 
-      // ============================================================
-      // 7. Crear cabecera del movimiento
-      // ============================================================
+      // =========================================================
+      // 6. Movimiento
+      // =========================================================
       const idMovimiento = randomUUID();
 
       await conn.execute(
@@ -300,15 +297,12 @@ module.exports = function procesarRecargaReciboFactory({
           recibo.id_usuario || null,
           montoTotal,
           saldoAnterior,
-          idRecibo,
-          `Recarga desde recibo ${idRecibo}`
+          idReciboLimpio,
+          `Recarga desde recibo ${idReciboLimpio}`
         ]
       );
 
-      // ============================================================
-      // 8. Crear un detalle por cada renglón de recarga
-      // ============================================================
-      for (const detalle of detallesRecarga) {
+      for (const detalle of detalles) {
         await conn.execute(
           `
           INSERT INTO monedero_movimiento_detalles (
@@ -334,85 +328,65 @@ module.exports = function procesarRecargaReciboFactory({
         );
       }
 
-      // ============================================================
-      // 9. Actualizar saldo materializado
-      // ============================================================
-      const [actualizacionCuenta] = await conn.execute(
+      // =========================================================
+      // 7. Actualizar saldo
+      // =========================================================
+      const [actualizacion] = await conn.execute(
         `
         UPDATE monedero_cuentas
         SET saldo_actual = ?
         WHERE id_cuenta = ?
           AND status = 'Activo'
         `,
-        [
-          saldoPosterior,
-          cuenta.id_cuenta
-        ]
+        [saldoPosterior, cuenta.id_cuenta]
       );
 
-      if (actualizacionCuenta.affectedRows !== 1) {
-        const error = new Error(
-          "Monedero: No fue posible actualizar el saldo de la cuenta"
+      if (actualizacion.affectedRows !== 1) {
+        throw crearError(
+          "No fue posible actualizar el saldo de la cuenta",
+          500
         );
-        error.statusCode = 500;
-        throw error;
       }
 
-      // ============================================================
-      // 10. Limpiar error y bandera de reintento
-      // ============================================================
-      await conn.execute(
-        `
-        UPDATE recibos
-        SET
-          error_message = CASE
-            WHEN error_message LIKE 'Monedero:%' THEN NULL
-            ELSE error_message
-          END,
-          reintentar_recarga_monedero = 0
-        WHERE id_recibo = ?
-        `,
-        [idRecibo]
-      );
+      await limpiarErrorMonedero(conn, idReciboLimpio);
 
-      logger.info("Recarga de monedero procesada", {
-        id_recibo: idRecibo,
+      logger.info("Recarga procesada correctamente", {
+        id_recibo: idReciboLimpio,
         id_movimiento: idMovimiento,
         id_cuenta: cuenta.id_cuenta,
         id_alumno: recibo.id_alumno,
-        cantidad_detalles: detallesRecarga.length,
-        monto_total: montoTotal,
+        monto: montoTotal,
         saldo_anterior: saldoAnterior,
-        saldo_posterior: saldoPosterior
+        saldo_posterior: saldoPosterior,
+        cantidad_detalles: detalles.length
       });
 
       return {
         procesado: true,
-        contiene_recarga: true,
-        id_recibo: idRecibo,
+        id_recibo: idReciboLimpio,
         id_movimiento: idMovimiento,
         id_cuenta: cuenta.id_cuenta,
         monto: montoTotal,
         saldo_anterior: saldoAnterior,
         saldo_posterior: saldoPosterior,
-        cantidad_detalles: detallesRecarga.length
+        cantidad_detalles: detalles.length
       };
     });
   }
 
-  /**
-   * Guarda un error legible para AppSheet.
-   */
   async function guardarErrorRecibo(idRecibo, error) {
+    const idReciboLimpio = String(idRecibo || "").trim();
+
     const mensajeOriginal = String(
-      error?.message || "Error desconocido al procesar la recarga"
+      error?.message ||
+      "Monedero: Error desconocido al procesar la recarga"
     );
 
-    const mensaje = mensajeOriginal.startsWith("Monedero:")
-      ? mensajeOriginal
-      : `Monedero: ${mensajeOriginal}`;
-
-    const mensajeSeguro = mensaje.substring(0, 255);
+    const mensaje = (
+      mensajeOriginal.startsWith("Monedero:")
+        ? mensajeOriginal
+        : `Monedero: ${mensajeOriginal}`
+    ).substring(0, 255);
 
     try {
       await pool.execute(
@@ -423,30 +397,27 @@ module.exports = function procesarRecargaReciboFactory({
           reintentar_recarga_monedero = 0
         WHERE id_recibo = ?
         `,
-        [
-          mensajeSeguro,
-          idRecibo
-        ]
+        [mensaje, idReciboLimpio]
       );
     } catch (updateError) {
-      logger.error("No se pudo guardar error de monedero en recibo", {
-        id_recibo: idRecibo,
-        error_original: mensajeSeguro,
+      logger.error("No se pudo guardar el error de monedero", {
+        id_recibo: idReciboLimpio,
+        error_original: mensaje,
         error_update: updateError.message
       });
     }
 
-    return mensajeSeguro;
+    return mensaje;
   }
 
-  /**
-   * Endpoint manual/reintentable.
-   */
   async function procesarRecargaReciboHandler(req, res) {
-    const { id_recibo } = req.body || {};
+    const idRecibo = String(
+      req.body?.id_recibo || ""
+    ).trim();
+
     const startTime = Date.now();
 
-    if (!id_recibo) {
+    if (!idRecibo) {
       return res.status(400).json({
         ok: false,
         error: "Monedero: id_recibo es requerido"
@@ -454,9 +425,7 @@ module.exports = function procesarRecargaReciboFactory({
     }
 
     try {
-      const resultado = await procesarRecargaRecibo(
-        String(id_recibo).trim()
-      );
+      const resultado = await procesarRecargaRecibo(idRecibo);
 
       return res.json({
         ok: true,
@@ -465,27 +434,32 @@ module.exports = function procesarRecargaReciboFactory({
       });
     } catch (error) {
       const mensaje = await guardarErrorRecibo(
-        String(id_recibo).trim(),
+        idRecibo,
         error
       );
 
       logger.error("Error procesando recarga de monedero", {
-        id_recibo,
+        id_recibo: idRecibo,
         error: mensaje,
-        stack: error.stack
+        status_code: error.statusCode || 500
       });
 
-      return res.status(error.statusCode || 500).json({
-        ok: false,
-        error: mensaje,
-        duration_ms: Date.now() - startTime
-      });
+      return res
+        .status(error.statusCode || 500)
+        .json({
+          ok: false,
+          error: mensaje,
+          duration_ms: Date.now() - startTime
+        });
     }
   }
 
   return {
     procesarRecargaRecibo,
     procesarRecargaReciboHandler,
-    guardarErrorRecibo
+    guardarErrorRecibo,
+
+    // Alias para conservar compatibilidad con emitir-recibo
+    guardarErrorRecargaRecibo: guardarErrorRecibo
   };
 };
