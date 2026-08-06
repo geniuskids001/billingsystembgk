@@ -26,7 +26,7 @@ console.log("DEBUG PDF IMPORT:", {
 const app = express();
 app.use(cors({
   origin: [
-    "https://tu-proyecto.lovable.app"
+    "https://genius-bites.lovable.app"
   ],
   methods: ["GET", "POST"],
   allowedHeaders: [
@@ -481,7 +481,6 @@ const guardarErrorRecargaRecibo =
 });
 
 const {
-  crearAccesoHandler,
   solicitarCodigoHandler,
   validarCodigoHandler,
   requireCajaToken,
@@ -797,11 +796,6 @@ app.post(
 
 // AppSheet genera el acceso inicial.
 // Protegido con el API token administrativo existente.
-app.post(
-  "/monedero/auth/caja/crear-acceso",
-  requireToken,
-  crearAccesoHandler
-);
 
 // Lovable solicita que se envíe el código.
 app.post(

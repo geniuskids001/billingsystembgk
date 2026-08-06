@@ -8,7 +8,7 @@ module.exports = function authCajaFactory({
 }) {
   const CHALLENGE_SECONDS = 10 * 60;
   const SESSION_SECONDS = 12 * 60 * 60;
-  const LAUNCH_SECONDS = 5 * 60;
+
 
   if (!secret) {
     throw new Error("MONEDERO_AUTH_SECRET es requerido");
@@ -166,134 +166,81 @@ module.exports = function authCajaFactory({
     return usuario;
   }
 
-  /**
-   * AppSheet llama este endpoint usando x-api-token.
-   * Genera un ticket temporal para abrir Lovable.
-   */
-  async function crearAccesoHandler(req, res, next) {
-    try {
-      const idUsuario = String(
-        req.body?.id_usuario || ""
-      ).trim();
-
-      if (!idUsuario) {
-        return res.status(400).json({
-          ok: false,
-          error: "id_usuario es requerido"
-        });
-      }
-
-      const usuario = await obtenerUsuarioActivo(idUsuario);
-      const now = Math.floor(Date.now() / 1000);
-
-      const launchToken = firmar({
-        purpose: "caja-launch",
-        id_usuario: usuario.id_usuario,
-        id_plantel: usuario.id_plantel,
-        nonce: crypto.randomUUID(),
-        iat: now,
-        exp: now + LAUNCH_SECONDS
-      });
-
-      logger.info("Acceso temporal de Caja creado", {
-        evento: "CAJA_AUTH_LAUNCH_CREATED",
-        id_usuario: usuario.id_usuario,
-        id_plantel: usuario.id_plantel
-      });
-
-      return res.json({
-        ok: true,
-        launch_token: launchToken,
-        expira_en_segundos: LAUNCH_SECONDS
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
+  
 
   /**
    * Lovable manda launch_token.
    * El backend envía el código por correo.
    */
-  async function solicitarCodigoHandler(req, res, next) {
-    try {
-      const launchToken = String(
-        req.body?.launch_token || ""
-      ).trim();
+ async function solicitarCodigoHandler(req, res, next) {
+  try {
+    const idUsuario = String(
+      req.body?.id_usuario || ""
+    ).trim();
 
-      if (!launchToken) {
-        return res.status(400).json({
-          ok: false,
-          error: "launch_token es requerido"
-        });
-      }
-
-      const launchPayload = verificarFirma(launchToken);
-
-      if (launchPayload.purpose !== "caja-launch") {
-        throw crearError("Tipo de acceso inválido", 401);
-      }
-
-      const usuario = await obtenerUsuarioActivo(
-        launchPayload.id_usuario
-      );
-
-      if (usuario.id_plantel !== launchPayload.id_plantel) {
-        throw crearError(
-          "El plantel del usuario cambió",
-          409
-        );
-      }
-
-      const ultimoEnvio =
-        enviosRecientes.get(usuario.id_usuario) || 0;
-
-      if (Date.now() - ultimoEnvio < 60_000) {
-        throw crearError(
-          "Espera un minuto antes de solicitar otro código",
-          429
-        );
-      }
-
-      const codigo = generarCodigo();
-      const nonce = crypto.randomUUID();
-      const now = Math.floor(Date.now() / 1000);
-
-      const challengeToken = firmar({
-        purpose: "caja-challenge",
-        id_usuario: usuario.id_usuario,
-        id_plantel: usuario.id_plantel,
-        codigo_hash: hashCodigo(codigo, nonce),
-        nonce,
-        iat: now,
-        exp: now + CHALLENGE_SECONDS
+    if (!idUsuario) {
+      return res.status(400).json({
+        ok: false,
+        error: "id_usuario es requerido"
       });
-
-      await sendAccessCode({
-        correo: usuario.correo,
-        nombre: `${usuario.nombre} ${usuario.apellidos}`.trim(),
-        codigo
-      });
-
-      enviosRecientes.set(usuario.id_usuario, Date.now());
-      intentosCodigo.set(nonce, 0);
-
-      logger.info("Código de acceso de Caja enviado", {
-        evento: "CAJA_AUTH_CODE_SENT",
-        id_usuario: usuario.id_usuario,
-        id_plantel: usuario.id_plantel
-      });
-
-      return res.json({
-        ok: true,
-        challenge_token: challengeToken,
-        correo_mascara: ocultarCorreo(usuario.correo),
-        expira_en_segundos: CHALLENGE_SECONDS
-      });
-    } catch (error) {
-      next(error);
     }
+
+    const usuario = await obtenerUsuarioActivo(idUsuario);
+
+    const ultimoEnvio =
+      enviosRecientes.get(usuario.id_usuario) || 0;
+
+    if (Date.now() - ultimoEnvio < 60_000) {
+      throw crearError(
+        "Espera un minuto antes de solicitar otro código",
+        429
+      );
+    }
+
+    const codigo = generarCodigo();
+    const nonce = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    const challengeToken = firmar({
+      purpose: "caja-challenge",
+      id_usuario: usuario.id_usuario,
+      id_plantel: usuario.id_plantel,
+      codigo_hash: hashCodigo(codigo, nonce),
+      nonce,
+      iat: now,
+      exp: now + CHALLENGE_SECONDS
+    });
+
+    await sendAccessCode({
+      correo: usuario.correo,
+      nombre:
+        `${usuario.nombre} ${usuario.apellidos}`.trim(),
+      codigo
+    });
+
+    enviosRecientes.set(
+      usuario.id_usuario,
+      Date.now()
+    );
+
+    intentosCodigo.set(nonce, 0);
+
+    logger.info("Código de acceso de Caja enviado", {
+      evento: "CAJA_AUTH_CODE_SENT",
+      id_usuario: usuario.id_usuario,
+      id_plantel: usuario.id_plantel
+    });
+
+    return res.json({
+      ok: true,
+      challenge_token: challengeToken,
+      correo_mascara: ocultarCorreo(usuario.correo),
+      expira_en_segundos: CHALLENGE_SECONDS
+    });
+  } catch (error) {
+    next(error);
   }
+}
 
   /**
    * Lovable manda challenge_token + código.
@@ -478,10 +425,9 @@ module.exports = function authCajaFactory({
   }
 
   return {
-    crearAccesoHandler,
-    solicitarCodigoHandler,
-    validarCodigoHandler,
-    requireCajaToken,
-    sesionHandler
-  };
+  solicitarCodigoHandler,
+  validarCodigoHandler,
+  requireCajaToken,
+  sesionHandler
+};
 };
