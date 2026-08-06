@@ -1,5 +1,7 @@
 const express = require("express");
 const mysql = require("mysql2/promise");
+const nodemailer = require("nodemailer");
+const cors = require("cors");
 const { Storage } = require("@google-cloud/storage");
 const { generateReciboPDF } = require("./pdf/recibo_pago_pdf");
 const { generateCortePDF } = require("./pdf/corte_pdf"); 
@@ -11,6 +13,7 @@ const emitirProductoUnicoLoteFactory = require('./services/emitir-producto-unico
 const crearCuentasAlumnosFactory = require("./modules/monedero/crear-cuentas-alumnos");
 const procesarRecargaReciboFactory = require("./modules/monedero/procesar-recarga-recibo");
 const cancelarCargosMensualesFactory = require("./services/cancelar-cargos-mensuales");
+const authCajaFactory = require("./modules/monedero/auth-caja");
 
 
 
@@ -21,6 +24,18 @@ console.log("DEBUG PDF IMPORT:", {
   timestamp: new Date().toISOString()
 });
 const app = express();
+app.use(cors({
+  origin: [
+    "https://tu-proyecto.lovable.app"
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-api-token"
+  ]
+}));
+
 app.use(express.json({ limit: "2mb" }));
 
 /* ================= LOGGER ================= */
@@ -54,6 +69,7 @@ const logger = {
 /* ================= CONFIGURATION ================= */
 const config = {
   apiToken: process.env.API_TOKEN,
+
   database: {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
@@ -64,16 +80,42 @@ const config = {
     timezone: "America/Mexico_City",
     dateStrings: true
   },
-  gcs: {
-    bucket: process.env.GCS_BUCKET,
+
+  monederoAuthSecret: process.env.MONEDERO_AUTH_SECRET,
+
+  smtp: {
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: process.env.SMTP_SECURE === "true",
+    user: process.env.SMTP_USER,
+    password: process.env.SMTP_PASSWORD,
+    from:
+      process.env.SMTP_FROM ||
+      process.env.SMTP_USER
   },
+
+  gcs: {
+    bucket: process.env.GCS_BUCKET
+  },
+
   port: process.env.PORT || 8080,
-  timezone: "America/Mexico_City",
+  timezone: "America/Mexico_City"
 };
 
 /* ================= VALIDATION ================= */
 function validateConfig() {
-  const required = ["apiToken", "database.user", "database.password", "database.database", "gcs.bucket"];
+  const required = [
+  "apiToken",
+  "database.user",
+  "database.password",
+  "database.database",
+  "gcs.bucket",
+  "monederoAuthSecret",
+  "smtp.host",
+  "smtp.user",
+  "smtp.password",
+  "smtp.from"
+];
   const missing = required.filter(key => {
     const value = key.split(".").reduce((obj, k) => obj?.[k], config);
     return !value;
@@ -146,6 +188,57 @@ async function executeInTransaction(callback) {
   } finally {
     conn.release();
   }
+}
+
+const mailTransporter = nodemailer.createTransport({
+  host: config.smtp.host,
+  port: config.smtp.port,
+  secure: config.smtp.secure,
+  auth: {
+    user: config.smtp.user,
+    pass: config.smtp.password
+  }
+});
+
+async function sendCajaAccessCode({
+  correo,
+  nombre,
+  codigo
+}) {
+  await mailTransporter.sendMail({
+    from: config.smtp.from,
+    to: correo,
+    subject: "Código de acceso a Genius Bites",
+    text:
+      `Hola ${nombre}.\n\n` +
+      `Tu código para ingresar a Caja es: ${codigo}\n\n` +
+      `El código vence en 10 minutos.\n` +
+      `Si no solicitaste este acceso, puedes ignorar el correo.`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:500px">
+        <h2>Genius Bites</h2>
+        <p>Hola ${nombre}.</p>
+        <p>Tu código para ingresar a Caja es:</p>
+        <div style="
+          font-size:32px;
+          font-weight:bold;
+          letter-spacing:8px;
+          padding:16px;
+          background:#f3f4f6;
+          text-align:center;
+          border-radius:8px;
+        ">
+          ${codigo}
+        </div>
+        <p>El código vence en 10 minutos.</p>
+      </div>
+    `
+  });
+
+  logger.info("Correo de acceso de Caja enviado", {
+    correo_mascara:
+      correo.replace(/^(.{2}).*(@.*)$/, "$1***$2")
+  });
 }
 
 /* ================= GOOGLE CLOUD STORAGE ================= */
@@ -370,11 +463,6 @@ const monederoRecargaService = procesarRecargaReciboFactory({
   logger
 });
 
-const cancelarCargosMensualesHandler =
-  cancelarCargosMensualesFactory({
-    executeInTransaction,
-    logger
-  });
 
 const procesarRecargaRecibo =
   monederoRecargaService.procesarRecargaRecibo;
@@ -385,6 +473,26 @@ const procesarRecargaReciboHandler =
 const guardarErrorRecargaRecibo =
   monederoRecargaService.guardarErrorRecibo;
 
+  const authCajaService = authCajaFactory({
+  pool,
+  logger,
+  secret: config.monederoAuthSecret,
+  sendAccessCode: sendCajaAccessCode
+});
+
+const {
+  crearAccesoHandler,
+  solicitarCodigoHandler,
+  validarCodigoHandler,
+  requireCajaToken,
+  sesionHandler
+} = authCajaService;
+
+const cancelarCargosMensualesHandler =
+  cancelarCargosMensualesFactory({
+    executeInTransaction,
+    logger
+  });
 
 const emitirReciboHandler = emitirReciboFactory({
   pool,
@@ -687,6 +795,32 @@ app.post(
   procesarRecargaReciboHandler
 );
 
+// AppSheet genera el acceso inicial.
+// Protegido con el API token administrativo existente.
+app.post(
+  "/monedero/auth/caja/crear-acceso",
+  requireToken,
+  crearAccesoHandler
+);
+
+// Lovable solicita que se envíe el código.
+app.post(
+  "/monedero/auth/caja/solicitar-codigo",
+  solicitarCodigoHandler
+);
+
+// Lovable valida el código.
+app.post(
+  "/monedero/auth/caja/validar-codigo",
+  validarCodigoHandler
+);
+
+// Lovable verifica que su sesión siga activa.
+app.get(
+  "/monedero/auth/caja/sesion",
+  requireCajaToken,
+  sesionHandler
+);
 
 // ===========================
 
