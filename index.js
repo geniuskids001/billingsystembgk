@@ -10,7 +10,7 @@ const cancelarCargosFactory = require("./services/cancelar-cargos");
 const emitirProductoUnicoLoteFactory = require('./services/emitir-producto-unico-lote');
 const crearCuentasAlumnosFactory = require("./modules/monedero/crear-cuentas-alumnos");
 const procesarRecargaReciboFactory = require("./modules/monedero/procesar-recarga-recibo");
-
+const cancelarCargosMensualesFactory = require("./services/cancelar-cargos-mensuales");
 
 
 
@@ -370,6 +370,12 @@ const monederoRecargaService = procesarRecargaReciboFactory({
   logger
 });
 
+const cancelarCargosMensualesHandler =
+  cancelarCargosMensualesFactory({
+    executeInTransaction,
+    logger
+  });
+
 const procesarRecargaRecibo =
   monederoRecargaService.procesarRecargaRecibo;
 
@@ -679,6 +685,18 @@ app.post(
   "/monedero/recargas/procesar",
   requireToken,
   procesarRecargaReciboHandler
+);
+
+
+// ===========================
+
+
+
+// GENERACIÓN Y CANCELACIÓN MASIVA DE CARGOS
+app.post(
+  "/cargos/cancelar-mensuales",
+  requireToken,
+  cancelarCargosMensualesHandler
 );
 
 app.post(
