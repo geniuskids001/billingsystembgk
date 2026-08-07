@@ -152,9 +152,6 @@ module.exports = function authCajaFactory({
     throw crearError("El usuario está inactivo", 403);
   }
 
-  if (!usuario.id_plantel) {
-    throw crearError("El usuario no tiene un plantel asignado", 409);
-  }
 
   if (!usuario.correo) {
     throw crearError("El usuario no tiene correo registrado", 409);
