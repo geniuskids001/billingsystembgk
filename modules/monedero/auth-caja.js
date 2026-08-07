@@ -124,47 +124,44 @@ module.exports = function authCajaFactory({
     return `${usuario.slice(0, 2)}***@${dominio}`;
   }
 
-  async function obtenerUsuarioActivo(idUsuario) {
-    const [[usuario]] = await pool.execute(
-      `
-      SELECT
-        id_usuario,
-        id_plantel,
-        nombre,
-        apellidos,
-        correo,
-        status
-      FROM usuarios
-      WHERE id_usuario = ?
-      LIMIT 1
-      `,
-      [idUsuario]
-    );
+  async function obtenerUsuarioActivo({ idUsuario, correo }) {
+  const campo = idUsuario ? "id_usuario" : "correo";
+  const valor = idUsuario || correo;
 
-    if (!usuario) {
-      throw crearError("Usuario no encontrado", 404);
-    }
+  const [[usuario]] = await pool.execute(
+    `
+    SELECT
+      id_usuario,
+      id_plantel,
+      nombre,
+      apellidos,
+      correo,
+      status
+    FROM usuarios
+    WHERE ${campo} = ?
+    LIMIT 1
+    `,
+    [valor]
+  );
 
-    if (usuario.status !== "Activo") {
-      throw crearError("El usuario está inactivo", 403);
-    }
-
-    if (!usuario.id_plantel) {
-      throw crearError(
-        "El usuario no tiene un plantel asignado",
-        409
-      );
-    }
-
-    if (!usuario.correo) {
-      throw crearError(
-        "El usuario no tiene correo registrado",
-        409
-      );
-    }
-
-    return usuario;
+  if (!usuario) {
+    throw crearError("Usuario no encontrado", 404);
   }
+
+  if (usuario.status !== "Activo") {
+    throw crearError("El usuario está inactivo", 403);
+  }
+
+  if (!usuario.id_plantel) {
+    throw crearError("El usuario no tiene un plantel asignado", 409);
+  }
+
+  if (!usuario.correo) {
+    throw crearError("El usuario no tiene correo registrado", 409);
+  }
+
+  return usuario;
+}
 
   
 
@@ -174,18 +171,20 @@ module.exports = function authCajaFactory({
    */
  async function solicitarCodigoHandler(req, res, next) {
   try {
-    const idUsuario = String(
-      req.body?.id_usuario || ""
-    ).trim();
+    const idUsuario = String(req.body?.id_usuario || "").trim();
+const correo = String(req.body?.correo || "").trim();
 
-    if (!idUsuario) {
-      return res.status(400).json({
-        ok: false,
-        error: "id_usuario es requerido"
-      });
-    }
+if (!idUsuario && !correo) {
+  return res.status(400).json({
+    ok: false,
+    error: "id_usuario o correo es requerido"
+  });
+}
 
-    const usuario = await obtenerUsuarioActivo(idUsuario);
+const usuario = await obtenerUsuarioActivo({
+  idUsuario,
+  correo
+});
 
     const ultimoEnvio =
       enviosRecientes.get(usuario.id_usuario) || 0;
@@ -304,9 +303,9 @@ module.exports = function authCajaFactory({
         throw crearError("Código incorrecto", 401);
       }
 
-      const usuario = await obtenerUsuarioActivo(
-        challenge.id_usuario
-      );
+      const usuario = await obtenerUsuarioActivo({
+  idUsuario: challenge.id_usuario
+});
 
       if (usuario.id_plantel !== challenge.id_plantel) {
         throw crearError(
@@ -380,9 +379,9 @@ module.exports = function authCajaFactory({
         );
       }
 
-      const usuario = await obtenerUsuarioActivo(
-        payload.id_usuario
-      );
+      const usuario = await obtenerUsuarioActivo({
+  idUsuario: payload.id_usuario
+});
 
       if (usuario.id_plantel !== payload.id_plantel) {
         throw crearError(
