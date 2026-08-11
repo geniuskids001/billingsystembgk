@@ -15,8 +15,8 @@ const procesarRecargaReciboFactory = require("./modules/monedero/procesar-recarg
 const cancelarCargosMensualesFactory = require("./services/cancelar-cargos-mensuales");
 const authCajaFactory = require("./modules/monedero/auth-caja");
 const consultarDatosFactory = require("./modules/monedero/consultar-datos");
-
-
+const procesarCompraFactory = require("./modules/monedero/procesar-compra");
+const procesarDevolucionFactory = require("./modules/monedero/procesar-devolucion");
 
 
 console.log("DEBUG PDF IMPORT:", {
@@ -471,8 +471,19 @@ const procesarRecargaRecibo =
 const procesarRecargaReciboHandler =
   monederoRecargaService.procesarRecargaReciboHandler;
 
+  const procesarDevolucionHandler =
+  procesarDevolucionFactory({
+    executeInTransaction,
+    logger
+  });
+
   const consultarDatosHandler = consultarDatosFactory({
   pool,
+  logger
+});
+
+const procesarCompraHandler = procesarCompraFactory({
+  executeInTransaction,
   logger
 });
 
@@ -792,6 +803,18 @@ app.post(
   "/monedero/cuentas/alumnos",
   requireToken,
   crearCuentasAlumnosHandler
+);
+
+app.post(
+  "/monedero/devoluciones/procesar",
+  requireCajaToken,
+  procesarDevolucionHandler
+);
+
+app.post(
+  "/monedero/compras/procesar",
+  requireCajaToken,
+  procesarCompraHandler
 );
 
 app.get(
