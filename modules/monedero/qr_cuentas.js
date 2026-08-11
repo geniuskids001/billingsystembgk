@@ -192,14 +192,12 @@ module.exports = function qrCuentasFactory({
         );
       }
 
-      // =========================================================
-      // 4. CREAR HOJAS DE 9 TARJETAS
-      // =========================================================
-      const hojas = [];
+      // 4. CREAR HOJAS DE 8 TARJETAS
+        const hojas = [];
 
-      for (let i = 0; i < tarjetas.length; i += 9) {
-        hojas.push(tarjetas.slice(i, i + 9));
-      }
+        for (let i = 0; i < tarjetas.length; i += 8) {
+            hojas.push(tarjetas.slice(i, i + 8));
+        }
 
       const hojasHtml = hojas
         .map(hoja => {
@@ -337,15 +335,18 @@ body {
   height: 279mm;
 
   margin: 18px auto;
-  padding: 8mm;
+  padding: 16mm 18mm;
 
   background: white;
 
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  grid-template-rows: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 85.6mm);
+  grid-template-rows: repeat(4, 54mm);
 
-  gap: 4mm;
+  gap: 6mm 8mm;
+
+  justify-content: center;
+  align-content: center;
 
   break-after: page;
 }
@@ -354,37 +355,90 @@ body {
   break-after: auto;
 }
 
+
 /* TARJETA */
 
 .card {
-  border: 1.2px solid #cfd8d3;
-  border-radius: 4mm;
+  position: relative;
 
-  padding: 5mm 4mm;
+  width: 85.6mm;
+  height: 54mm;
 
-  display: flex;
-  flex-direction: column;
+  border: 1px solid #d8e3dd;
+  border-radius: 3.5mm;
+
+  padding: 4.5mm;
+
+  background:
+    linear-gradient(
+      135deg,
+      #ffffff 0%,
+      #f7fbf9 100%
+    );
+
+  display: grid;
+  grid-template-columns: 34mm 1fr;
+  grid-template-rows: auto 1fr auto;
+
+  column-gap: 4mm;
+
   align-items: center;
 
-  text-align: center;
-
   overflow: hidden;
+
+  box-shadow:
+    0 1.5mm 4mm rgba(20, 60, 40, .08);
 }
+
+
+/* ACENTO VERDE */
+
+.card::before {
+  content: "";
+
+  position: absolute;
+
+  left: 0;
+  top: 0;
+  bottom: 0;
+
+  width: 2.5mm;
+
+  background: #1F8A5B;
+}
+
+
+/* QR */
 
 .qr-box {
   position: relative;
 
-  width: 48mm;
-  height: 48mm;
+  width: 34mm;
+  height: 34mm;
+
+  grid-row: 1 / span 3;
+
+  margin-left: 1mm;
+
+  background: white;
+
+  border-radius: 2.5mm;
+
+  padding: 1.5mm;
+
+  box-shadow:
+    0 1mm 3mm rgba(0,0,0,.08);
 }
 
 .qr {
   width: 100%;
   height: 100%;
+
   display: block;
 }
 
-/* LOGO */
+
+/* LOGO CENTRAL DEL QR */
 
 .logo {
   position: absolute;
@@ -394,17 +448,20 @@ body {
 
   transform: translate(-50%, -50%);
 
-  width: 11mm;
-  height: 11mm;
+  width: 8mm;
+  height: 8mm;
 
-  padding: 1.2mm;
+  padding: 1mm;
 
   background: white;
-  border-radius: 2mm;
+  border-radius: 1.6mm;
 
   display: flex;
   align-items: center;
   justify-content: center;
+
+  box-shadow:
+    0 .5mm 1.5mm rgba(0,0,0,.08);
 }
 
 .logo img {
@@ -412,25 +469,58 @@ body {
   max-height: 100%;
 }
 
-/* DATOS */
+
+/* BRANDING */
+
+.card::after {
+  content: "GENIUS BITES";
+
+  position: absolute;
+
+  top: 4mm;
+  right: 4.5mm;
+
+  color: #1F8A5B;
+
+  font-size: 7.5pt;
+  font-weight: 800;
+
+  letter-spacing: .7px;
+}
+
+
+/* NOMBRE */
 
 .nombre {
-  margin-top: 3mm;
+  grid-column: 2;
 
-  font-size: 12pt;
-  font-weight: 700;
+  align-self: end;
+
+  margin-top: 6mm;
+
+  color: #17352a;
+
+  font-size: 11.5pt;
+  font-weight: 800;
+
   line-height: 1.15;
 }
 
+
+/* GRUPO */
+
 .grupo {
-  margin-top: 1.3mm;
+  grid-column: 2;
 
-  color: #68736d;
+  align-self: start;
 
-  font-size: 9.5pt;
+  margin-top: 1.8mm;
+
+  color: #68756e;
+
+  font-size: 9pt;
   font-weight: 600;
 }
-
 /* IMPRESIÓN */
 
 @page {
