@@ -17,7 +17,7 @@ const authCajaFactory = require("./modules/monedero/auth-caja");
 const consultarDatosFactory = require("./modules/monedero/consultar-datos");
 const procesarCompraFactory = require("./modules/monedero/procesar-compra");
 const procesarDevolucionFactory = require("./modules/monedero/procesar-devolucion");
-
+const qrCuentasFactory = require("./modules/monedero/qr_cuentas");
 
 console.log("DEBUG PDF IMPORT:", {
   generateReciboPDF_type: typeof generateReciboPDF,
@@ -471,6 +471,15 @@ const procesarRecargaRecibo =
 const procesarRecargaReciboHandler =
   monederoRecargaService.procesarRecargaReciboHandler;
 
+  const qrCuentasService = qrCuentasFactory({
+  pool,
+  logger
+});
+
+const {
+  imprimirHandler
+} = qrCuentasService;
+
   const procesarDevolucionHandler =
   procesarDevolucionFactory({
     executeInTransaction,
@@ -827,6 +836,13 @@ app.post(
   "/monedero/recargas/procesar",
   requireToken,
   procesarRecargaReciboHandler
+);
+
+
+
+app.get(
+  "/monedero/qr/imprimir",
+  imprimirHandler
 );
 
 // AppSheet genera el acceso inicial.
