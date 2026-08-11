@@ -129,20 +129,23 @@ module.exports = function authCajaFactory({
   const valor = idUsuario || correo;
 
   const [[usuario]] = await pool.execute(
-    `
-    SELECT
-      id_usuario,
-      id_plantel,
-      nombre,
-      apellidos,
-      correo,
-      status
-    FROM usuarios
-    WHERE ${campo} = ?
-    LIMIT 1
-    `,
-    [valor]
-  );
+  `
+  SELECT
+    u.id_usuario,
+    u.id_plantel,
+    u.nombre,
+    u.apellidos,
+    u.correo,
+    u.status,
+    r.nombre AS rol
+  FROM usuarios u
+  LEFT JOIN roles r
+    ON r.id_rol = u.id_rol
+  WHERE u.${campo} = ?
+  LIMIT 1
+  `,
+  [valor]
+);
 
   if (!usuario) {
     throw crearError("Usuario no encontrado", 404);
@@ -336,12 +339,12 @@ const usuario = await obtenerUsuarioActivo({
         access_token: accessToken,
         expira_en_segundos: SESSION_SECONDS,
         usuario: {
-          id_usuario: usuario.id_usuario,
-          nombre:
-            `${usuario.nombre} ${usuario.apellidos}`.trim(),
-          id_plantel: usuario.id_plantel,
-          rol: "Caja"
-        }
+  id_usuario: usuario.id_usuario,
+  nombre:
+    `${usuario.nombre} ${usuario.apellidos}`.trim(),
+  id_plantel: usuario.id_plantel,
+  rol: usuario.rol
+}
       });
     } catch (error) {
       next(error);
@@ -388,13 +391,13 @@ const usuario = await obtenerUsuarioActivo({
       }
 
       req.caja = {
-        id_usuario: usuario.id_usuario,
-        id_plantel: usuario.id_plantel,
-        nombre:
-          `${usuario.nombre} ${usuario.apellidos}`.trim(),
-        rol: "Caja",
-        session_id: payload.session_id
-      };
+  id_usuario: usuario.id_usuario,
+  id_plantel: usuario.id_plantel,
+  nombre:
+    `${usuario.nombre} ${usuario.apellidos}`.trim(),
+  rol: usuario.rol,
+  session_id: payload.session_id
+};
 
       next();
     } catch (error) {

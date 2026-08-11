@@ -14,6 +14,7 @@ const crearCuentasAlumnosFactory = require("./modules/monedero/crear-cuentas-alu
 const procesarRecargaReciboFactory = require("./modules/monedero/procesar-recarga-recibo");
 const cancelarCargosMensualesFactory = require("./services/cancelar-cargos-mensuales");
 const authCajaFactory = require("./modules/monedero/auth-caja");
+const consultarDatosFactory = require("./modules/monedero/consultar-datos");
 
 
 
@@ -470,6 +471,11 @@ const procesarRecargaRecibo =
 const procesarRecargaReciboHandler =
   monederoRecargaService.procesarRecargaReciboHandler;
 
+  const consultarDatosHandler = consultarDatosFactory({
+  pool,
+  logger
+});
+
 const guardarErrorRecargaRecibo =
   monederoRecargaService.guardarErrorRecibo;
 
@@ -786,6 +792,12 @@ app.post(
   "/monedero/cuentas/alumnos",
   requireToken,
   crearCuentasAlumnosHandler
+);
+
+app.get(
+  "/monedero/datos/:recurso",
+  requireCajaToken,
+  consultarDatosHandler
 );
 
 app.post(
