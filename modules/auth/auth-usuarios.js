@@ -390,187 +390,247 @@ module.exports = function authUsuariosFactory({
     }
   }
 
+
+  // ============================================================
+  // VALIDAR CÓDIGO 
+  // ============================================================
+  async function validarCodigoPinHandler(
+  req,
+  res,
+  next
+) {
+  try {
+    const challengeToken = String(
+      req.body?.challenge_token || ""
+    ).trim();
+
+    const codigo = String(
+      req.body?.codigo || ""
+    ).trim();
+
+    if (!challengeToken) {
+      throw crearError(
+        "challenge_token es requerido",
+        400
+      );
+    }
+
+    if (!/^\d{6}$/.test(codigo)) {
+      throw crearError(
+        "Código inválido",
+        400
+      );
+    }
+
+    const challenge =
+      verificarFirma(challengeToken);
+
+    if (challenge.purpose !== "pin-change") {
+      throw crearError(
+        "Solicitud inválida",
+        401
+      );
+    }
+
+    const [[auth]] = await pool.execute(
+      `
+      SELECT
+        codigo_hash,
+        codigo_nonce,
+        codigo_expira,
+        codigo_intentos,
+        (codigo_expira <= NOW()) AS expirado
+      FROM usuarios_auth
+      WHERE id_usuario = ?
+      LIMIT 1
+      `,
+      [challenge.id_usuario]
+    );
+
+    if (!auth) {
+      throw crearError(
+        "Solicitud de PIN no encontrada",
+        404
+      );
+    }
+
+    if (auth.codigo_nonce !== challenge.nonce) {
+      throw crearError(
+        "El código ya no es válido",
+        401
+      );
+    }
+
+    if (!auth.codigo_expira || auth.expirado) {
+      throw crearError(
+        "El código expiró",
+        401
+      );
+    }
+
+    if (Number(auth.codigo_intentos) >= 5) {
+      throw crearError(
+        "Demasiados intentos. Solicita otro código.",
+        429
+      );
+    }
+
+    const hashIngresado = hashCodigo(
+      codigo,
+      challenge.nonce
+    );
+
+    if (
+      !compararHash(
+        hashIngresado,
+        auth.codigo_hash
+      )
+    ) {
+      await pool.execute(
+        `
+        UPDATE usuarios_auth
+        SET codigo_intentos = codigo_intentos + 1
+        WHERE id_usuario = ?
+        `,
+        [challenge.id_usuario]
+      );
+
+      throw crearError(
+        "Código incorrecto",
+        401
+      );
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+
+    const verificationToken = firmar({
+      purpose: "pin-verified",
+      id_usuario: challenge.id_usuario,
+      accion: challenge.accion,
+      nonce: challenge.nonce,
+      iat: now,
+      exp: now + CODE_SECONDS
+    });
+
+    return res.json({
+      ok: true,
+      verification_token: verificationToken,
+      expira_en_segundos: CODE_SECONDS
+    });
+
+  } catch (error) {
+    next(error);
+  }
+}
+
   // ============================================================
   // CONFIRMAR CÓDIGO + GUARDAR NUEVO PIN
   // ============================================================
 
   async function guardarPinHandler(
-    req,
-    res,
-    next
-  ) {
-    try {
+  req,
+  res,
+  next
+) {
+  try {
+    const verificationToken = String(
+      req.body?.verification_token || ""
+    ).trim();
 
-      const challengeToken = String(
-        req.body?.challenge_token || ""
-      ).trim();
+    const pin = String(
+      req.body?.pin || ""
+    ).trim();
 
-      const codigo = String(
-        req.body?.codigo || ""
-      ).trim();
-
-      const pin = String(
-        req.body?.pin || ""
-      ).trim();
-
-      if (!challengeToken) {
-        throw crearError(
-          "challenge_token es requerido",
-          400
-        );
-      }
-
-      if (!/^\d{6}$/.test(codigo)) {
-        throw crearError(
-          "Código inválido",
-          400
-        );
-      }
-
-      if (!validarFormatoPin(pin)) {
-        throw crearError(
-          "El PIN debe tener 4 o 6 dígitos",
-          400
-        );
-      }
-
-      const challenge =
-        verificarFirma(challengeToken);
-
-      if (
-        challenge.purpose !== "pin-change"
-      ) {
-        throw crearError(
-          "Solicitud inválida",
-          401
-        );
-      }
-
-      const [[auth]] = await pool.execute(
-  `
-  SELECT
-    codigo_hash,
-    codigo_nonce,
-    codigo_expira,
-    codigo_intentos,
-    (codigo_expira <= NOW()) AS expirado
-  FROM usuarios_auth
-  WHERE id_usuario = ?
-  LIMIT 1
-  `,
-  [challenge.id_usuario]
-);
-
-      if (!auth) {
-        throw crearError(
-          "Solicitud de PIN no encontrada",
-          404
-        );
-      }
-
-      if (
-        auth.codigo_nonce !== challenge.nonce
-      ) {
-        throw crearError(
-          "El código ya no es válido",
-          401
-        );
-      }
-
-      if (!auth.codigo_expira || auth.expirado) {
-  throw crearError(
-    "El código expiró",
-    401
-  );
-}
-
-      if (Number(auth.codigo_intentos) >= 5) {
-        throw crearError(
-          "Demasiados intentos. Solicita otro código.",
-          429
-        );
-      }
-
-      const hashIngresado = hashCodigo(
-        codigo,
-        challenge.nonce
+    if (!verificationToken) {
+      throw crearError(
+        "verification_token es requerido",
+        400
       );
-
-      if (
-        !compararHash(
-          hashIngresado,
-          auth.codigo_hash
-        )
-      ) {
-
-        await pool.execute(
-          `
-          UPDATE usuarios_auth
-          SET codigo_intentos =
-              codigo_intentos + 1
-          WHERE id_usuario = ?
-          `,
-          [challenge.id_usuario]
-        );
-
-        throw crearError(
-          "Código incorrecto",
-          401
-        );
-      }
-
-      const nuevoHash =
-        await hashPin(pin);
-        const pinLongitud = pin.length;
-
-      await pool.execute(
-  `
-  UPDATE usuarios_auth
-  SET
-    pin_hash = ?,
-    pin_longitud = ?,
-    fecha_pin = NOW(),
-
-    intentos_fallidos = 0,
-    bloqueado_hasta = NULL,
-
-    codigo_hash = NULL,
-    codigo_nonce = NULL,
-    codigo_expira = NULL,
-    codigo_intentos = 0
-
-  WHERE id_usuario = ?
-  `,
-  [
-    nuevoHash,
-    pinLongitud,
-    challenge.id_usuario
-  ]
-);
-
-      logger.info(
-        "PIN establecido",
-        {
-          evento: "AUTH_PIN_CHANGED",
-          id_usuario:
-            challenge.id_usuario,
-          accion:
-            challenge.accion
-        }
-      );
-
-      return res.json({
-        ok: true,
-        mensaje:
-          challenge.accion === "Restablecer"
-            ? "PIN restablecido correctamente"
-            : "PIN establecido correctamente"
-      });
-
-    } catch (error) {
-      next(error);
     }
+
+    if (!validarFormatoPin(pin)) {
+      throw crearError(
+        "El PIN debe tener 4 o 6 dígitos",
+        400
+      );
+    }
+
+    const verification =
+      verificarFirma(verificationToken);
+
+    if (verification.purpose !== "pin-verified") {
+      throw crearError(
+        "Verificación inválida",
+        401
+      );
+    }
+
+    const [[auth]] = await pool.execute(
+      `
+      SELECT codigo_nonce
+      FROM usuarios_auth
+      WHERE id_usuario = ?
+      LIMIT 1
+      `,
+      [verification.id_usuario]
+    );
+
+    if (
+      !auth ||
+      auth.codigo_nonce !== verification.nonce
+    ) {
+      throw crearError(
+        "La verificación ya no es válida",
+        401
+      );
+    }
+
+    const nuevoHash = await hashPin(pin);
+    const pinLongitud = pin.length;
+
+    await pool.execute(
+      `
+      UPDATE usuarios_auth
+      SET
+        pin_hash = ?,
+        pin_longitud = ?,
+        fecha_pin = NOW(),
+        intentos_fallidos = 0,
+        bloqueado_hasta = NULL,
+        codigo_hash = NULL,
+        codigo_nonce = NULL,
+        codigo_expira = NULL,
+        codigo_intentos = 0
+      WHERE id_usuario = ?
+      `,
+      [
+        nuevoHash,
+        pinLongitud,
+        verification.id_usuario
+      ]
+    );
+
+    logger.info(
+      "PIN establecido",
+      {
+        evento: "AUTH_PIN_CHANGED",
+        id_usuario: verification.id_usuario,
+        accion: verification.accion
+      }
+    );
+
+    return res.json({
+      ok: true,
+      mensaje:
+        verification.accion === "Restablecer"
+          ? "PIN restablecido correctamente"
+          : "PIN establecido correctamente"
+    });
+
+  } catch (error) {
+    next(error);
   }
+}
 
   // ============================================================
   // LOGIN CON PIN
@@ -865,6 +925,7 @@ async function identificarUsuarioHandler(
   return {
   identificarUsuarioHandler,
   solicitarCodigoPin,
+  validarCodigoPinHandler,
   guardarPinHandler,
   loginPinHandler,
   requireAuthToken,

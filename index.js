@@ -639,6 +639,7 @@ const authService = authUsuariosFactory({
 const {
   identificarUsuarioHandler,
   solicitarCodigoPin,
+  validarCodigoPinHandler,
   guardarPinHandler,
   loginPinHandler,
   requireAuthToken,
@@ -1020,6 +1021,11 @@ app.get(
 app.post(
   "/auth/pin/codigo",
   solicitarCodigoPin
+);
+
+app.post(
+  "/auth/pin/validar-codigo",
+  validarCodigoPinHandler
 );
 
 // Confirmar código y establecer/restablecer PIN
