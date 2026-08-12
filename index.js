@@ -145,6 +145,97 @@ function requireToken(req, res, next) {
   next();
 }
 
+async function requireTokenUsuario(req, res, next) {
+  const token = req.headers["x-api-token"];
+
+  if (!token) {
+    return res.status(401).json({
+      ok: false,
+      error: "Token requerido"
+    });
+  }
+
+  if (token !== config.apiToken) {
+    return res.status(401).json({
+      ok: false,
+      error: "Token inválido"
+    });
+  }
+
+  const idUsuario = String(
+    req.body?.id_usuario || ""
+  ).trim();
+
+  if (!idUsuario) {
+    return res.status(400).json({
+      ok: false,
+      error: "id_usuario es requerido"
+    });
+  }
+
+
+
+  const [[usuario]] = await pool.execute(
+    `
+    SELECT
+      u.id_usuario,
+      u.id_plantel,
+      u.nombre,
+      u.apellidos,
+      u.status,
+      r.nombre AS rol
+    FROM usuarios u
+    LEFT JOIN roles r
+      ON r.id_rol = u.id_rol
+    WHERE u.id_usuario = ?
+    LIMIT 1
+    `,
+    [idUsuario]
+  );
+
+  if (!usuario || usuario.status !== "Activo") {
+    return res.status(403).json({
+      ok: false,
+      error: "Usuario no autorizado"
+    });
+  }
+
+  req.usuario = {
+    id_usuario: usuario.id_usuario,
+    id_plantel: usuario.id_plantel,
+    nombre: `${usuario.nombre} ${usuario.apellidos}`.trim(),
+    rol: usuario.rol
+  };
+
+  next();
+}
+
+async function requireUsuarioOperacion(req, res, next) {
+  // AppSheet → x-api-token + id_usuario
+  if (req.headers["x-api-token"]) {
+    return requireTokenUsuario(req, res, next);
+  }
+
+  // Genius Bites / Lovable → Bearer token
+  return requireAuthToken(req, res, (error) => {
+    if (error) return next(error);
+
+    req.usuario =
+      req.usuario ||
+      req.caja ||
+      req.auth;
+
+    if (!req.usuario?.id_usuario) {
+      return res.status(401).json({
+        ok: false,
+        error: "No fue posible identificar al usuario"
+      });
+    }
+
+    next();
+  });
+}
+
 function errorHandler(err, req, res, next) {
   logger.error("Error handler triggered", {
     error_message: err.message,
@@ -870,8 +961,7 @@ app.post(
 
 app.post(
   "/monedero/devoluciones/procesar",
-  requireAuthToken,
-  requireCaja,
+  requireUsuarioOperacion,
   procesarDevolucionHandler
 );
 

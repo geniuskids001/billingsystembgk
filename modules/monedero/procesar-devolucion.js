@@ -34,8 +34,8 @@ module.exports = function procesarDevolucionFactory({
         req.body?.motivo || ""
       ).trim();
 
-      const idUsuario = req.caja?.id_usuario;
-      const idPlantelCaja = req.caja?.id_plantel || null;
+      const idUsuario = req.usuario?.id_usuario;
+      const idPlantelCaja = req.usuario?.id_plantel || null;
 
       // =========================================================
       // 1. VALIDAR PAYLOAD
@@ -56,11 +56,11 @@ module.exports = function procesarDevolucionFactory({
       }
 
       if (!idUsuario) {
-        throw crearError(
-          "No fue posible identificar al usuario de caja",
-          401
-        );
-      }
+  throw crearError(
+    "No fue posible identificar al usuario",
+    401
+  );
+}
 
       if (motivo.length > 200) {
         throw crearError(
@@ -730,7 +730,7 @@ module.exports = function procesarDevolucionFactory({
             req.body?.id_movimiento_compra || null,
 
           id_usuario:
-            req.caja?.id_usuario || null,
+          req.usuario?.id_usuario || null,
 
           error: error.message,
           status_code:
