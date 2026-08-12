@@ -486,28 +486,31 @@ for (const detalle of detallesDevolucion) {
     ]
   );
 
+  
   // Actualizar estado del detalle ORIGINAL de compra
-  await conn.execute(
-    `
-    UPDATE monedero_movimiento_detalles
-    SET
-      cantidad_devuelta =
-        cantidad_devuelta + ?,
+const nuevaCantidadDevuelta =
+  Number(detalle.cantidad_devuelta || 0) +
+  Number(detalle.cantidad_devolver);
 
-      devuelto =
-        (cantidad_devuelta + ? >= cantidad),
+const detalleDevuelto =
+  nuevaCantidadDevuelta >= Number(detalle.cantidad);
 
-      solicitar_devolucion = FALSE,
-      cantidad_devolver = NULL
-
-    WHERE id_movimiento_detalle = ?
-    `,
-    [
-      detalle.cantidad_devolver,
-      detalle.cantidad_devolver,
-      detalle.id_movimiento_detalle
-    ]
-  );
+await conn.execute(
+  `
+  UPDATE monedero_movimiento_detalles
+  SET
+    cantidad_devuelta = ?,
+    devuelto = ?,
+    solicitar_devolucion = FALSE,
+    cantidad_devolver = NULL
+  WHERE id_movimiento_detalle = ?
+  `,
+  [
+    nuevaCantidadDevuelta,
+    detalleDevuelto ? 1 : 0,
+    detalle.id_movimiento_detalle
+  ]
+);
 }
 
 // =====================================================
