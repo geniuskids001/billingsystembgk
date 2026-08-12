@@ -19,6 +19,7 @@ const consultarDatosFactory = require("./modules/monedero/consultar-datos");
 const procesarCompraFactory = require("./modules/monedero/procesar-compra");
 const procesarDevolucionFactory = require("./modules/monedero/procesar-devolucion");
 const qrCuentasFactory = require("./modules/monedero/qr_cuentas");
+const procesarAjusteFactory = require("./modules/monedero/procesar-ajuste");
 
 console.log("DEBUG PDF IMPORT:", {
   generateReciboPDF_type: typeof generateReciboPDF,
@@ -616,6 +617,12 @@ const {
     logger
   });
 
+  const procesarAjusteHandler =
+  procesarAjusteFactory({
+    executeInTransaction,
+    logger
+  });
+
   const consultarDatosHandler = consultarDatosFactory({
   pool,
   logger
@@ -1005,6 +1012,11 @@ app.post(
   procesarRecargaReciboHandler
 );
 
+app.post(
+  "/monedero/ajustes/procesar",
+  requireUsuarioOperacion,
+  procesarAjusteHandler
+);
 
 
 
@@ -1012,6 +1024,7 @@ app.get(
   "/monedero/qr/imprimir",
   imprimirHandler
 );
+
 
 // ============================================================
 // AUTH GENERAL
