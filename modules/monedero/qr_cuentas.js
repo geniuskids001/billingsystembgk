@@ -619,7 +619,130 @@ ${hojasHtml}
     }
   }
 
+
+
+  async function resolverQrHandler(req, res, next) {
+  try {
+    const qrToken = String(
+      req.params.qr_token || ""
+    ).trim();
+
+    if (!qrToken) {
+      throw crearError(
+        "QR inválido",
+        400
+      );
+    }
+
+    // =========================================================
+    // 1. BUSCAR RELACIÓN QR
+    // =========================================================
+    const [[relacion]] = await pool.execute(
+      `
+      SELECT
+        mca.id_cuenta_alumno,
+        mca.id_alumno,
+        mca.id_cuenta,
+        mca.status AS status_relacion,
+
+        mc.status AS status_cuenta,
+
+        a.status AS status_alumno,
+        a.id_plantel_academico
+
+      FROM monedero_cuenta_alumnos mca
+
+      LEFT JOIN monedero_cuentas mc
+        ON mc.id_cuenta = mca.id_cuenta
+
+      LEFT JOIN alumnos a
+        ON a.id_alumno = mca.id_alumno
+
+      WHERE mca.qr_token = ?
+      LIMIT 1
+      `,
+      [qrToken]
+    );
+
+    if (!relacion) {
+      throw crearError(
+        "QR no válido o no registrado",
+        404
+      );
+    }
+
+    if (!relacion.id_alumno) {
+      throw crearError(
+        "Alumno no encontrado",
+        404
+      );
+    }
+
+    if (relacion.status_alumno !== "Activo") {
+      throw crearError(
+        "El alumno está inactivo",
+        409
+      );
+    }
+
+    if (relacion.status_relacion !== "Activo") {
+      throw crearError(
+        "La tarjeta QR está inactiva",
+        409
+      );
+    }
+
+    if (relacion.status_cuenta !== "Activo") {
+      throw crearError(
+        "La cuenta del alumno está inactiva",
+        409
+      );
+    }
+
+    if (!relacion.id_plantel_academico) {
+      throw crearError(
+        "El alumno no tiene plantel asignado",
+        409
+      );
+    }
+
+    // =========================================================
+    // 2. CONFIGURACIÓN GENIUS BITES
+    // =========================================================
+    const [[configuracion]] = await pool.execute(
+      `
+      SELECT id_configuracion
+      FROM monedero_configuracion_plantel
+      WHERE id_plantel = ?
+        AND status = 'Activo'
+      LIMIT 1
+      `,
+      [relacion.id_plantel_academico]
+    );
+
+    if (!configuracion) {
+      throw crearError(
+        "Genius Bites no está configurado para este plantel",
+        409
+      );
+    }
+
+    // =========================================================
+    // 3. RESPUESTA MÍNIMA
+    // =========================================================
+    return res.json({
+      ok: true,
+      id_cuenta_alumno: relacion.id_cuenta_alumno,
+      id_alumno: relacion.id_alumno
+    });
+
+  } catch (error) {
+    next(error);
+  }
+}
+
   return {
-    imprimirHandler
-  };
+  imprimirHandler,
+  resolverQrHandler
+};
 };

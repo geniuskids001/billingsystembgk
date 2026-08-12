@@ -477,7 +477,8 @@ const procesarRecargaReciboHandler =
 });
 
 const {
-  imprimirHandler
+  imprimirHandler,
+  resolverQrHandler
 } = qrCuentasService;
 
   const procesarDevolucionHandler =
@@ -824,6 +825,12 @@ app.post(
   "/monedero/compras/procesar",
   requireCajaToken,
   procesarCompraHandler
+);
+
+app.get(
+  "/monedero/qr/resolver/:qr_token",
+  requireCajaToken,
+  resolverQrHandler
 );
 
 app.get(
