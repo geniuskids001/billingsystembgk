@@ -226,34 +226,18 @@ module.exports = function procesarDevolucionFactory({
           const [detallesCompra] = await conn.execute(
             `
             SELECT
-              d.id_movimiento_detalle,
-              d.id_producto_monedero,
-              d.nombre_producto,
-              d.requiere_preparacion,
-              d.cantidad,
-              d.precio_unitario,
+  d.id_movimiento_detalle,
+  d.id_producto_monedero,
+  d.nombre_producto,
+  d.requiere_preparacion,
+  d.cantidad,
+  d.precio_unitario,
+  d.cantidad_devuelta
 
-              COALESCE((
-                SELECT SUM(dd.cantidad)
-                FROM monedero_movimiento_detalles dd
-
-                JOIN monedero_movimientos dev
-                  ON dev.id_movimiento = dd.id_movimiento
-
-                WHERE
-                  dd.id_movimiento_detalle_origen =
-                    d.id_movimiento_detalle
-
-                  AND dev.tipo_movimiento = 'Devolucion'
-
-                  AND dev.id_movimiento_origen = ?
-              ), 0) AS cantidad_devuelta
-
-            FROM monedero_movimiento_detalles d
-            WHERE d.id_movimiento = ?
+FROM monedero_movimiento_detalles d
+WHERE d.id_movimiento = ?
             `,
             [
-              idMovimientoCompra,
               idMovimientoCompra
             ]
           );
@@ -462,47 +446,101 @@ module.exports = function procesarDevolucionFactory({
             ]
           );
 
-          // =====================================================
-          // 2.9 DETALLES DE DEVOLUCIÓN
-          // =====================================================
+        // =====================================================
+// 2.9 DETALLES DE DEVOLUCIÓN
+// =====================================================
 
-          for (const detalle of detallesDevolucion) {
+for (const detalle of detallesDevolucion) {
 
-            await conn.execute(
-              `
-              INSERT INTO monedero_movimiento_detalles (
-                id_movimiento_detalle,
-                id_movimiento,
-                id_movimiento_detalle_origen,
-                id_producto_monedero,
-                nombre_producto,
-                requiere_preparacion,
-                cantidad,
-                precio_unitario
-              )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-              `,
-              [
-                randomUUID(),
-                idMovimientoDevolucion,
+  // Crear detalle del nuevo movimiento de devolución
+  await conn.execute(
+    `
+    INSERT INTO monedero_movimiento_detalles (
+      id_movimiento_detalle,
+      id_movimiento,
+      id_movimiento_detalle_origen,
+      id_producto_monedero,
+      nombre_producto,
+      requiere_preparacion,
+      cantidad,
+      precio_unitario
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      randomUUID(),
+      idMovimientoDevolucion,
 
-                // Detalle exacto de la compra original
-                detalle.id_movimiento_detalle,
+      // Detalle exacto de la compra original
+      detalle.id_movimiento_detalle,
 
-                detalle.id_producto_monedero,
-                detalle.nombre_producto,
-                Number(
-                  detalle.requiere_preparacion
-                ) === 1
-                  ? 1
-                  : 0,
+      detalle.id_producto_monedero,
+      detalle.nombre_producto,
 
-                detalle.cantidad_devolver,
-                Number(detalle.precio_unitario)
-              ]
-            );
-          }
+      Number(detalle.requiere_preparacion) === 1
+        ? 1
+        : 0,
 
+      detalle.cantidad_devolver,
+      Number(detalle.precio_unitario)
+    ]
+  );
+
+  // Actualizar estado del detalle ORIGINAL de compra
+  await conn.execute(
+    `
+    UPDATE monedero_movimiento_detalles
+    SET
+      cantidad_devuelta =
+        cantidad_devuelta + ?,
+
+      devuelto =
+        (cantidad_devuelta + ? >= cantidad),
+
+      solicitar_devolucion = FALSE,
+      cantidad_devolver = NULL
+
+    WHERE id_movimiento_detalle = ?
+    `,
+    [
+      detalle.cantidad_devolver,
+      detalle.cantidad_devolver,
+      detalle.id_movimiento_detalle
+    ]
+  );
+}
+
+// =====================================================
+// ACTUALIZAR ESTADO DEL MOVIMIENTO ORIGINAL
+// =====================================================
+
+const [[estadoCompra]] = await conn.execute(
+  `
+  SELECT
+    COUNT(*) AS pendientes
+  FROM monedero_movimiento_detalles
+  WHERE id_movimiento = ?
+    AND cantidad_devuelta < cantidad
+  `,
+  [idMovimientoCompra]
+);
+
+const compraDevuelta =
+  Number(estadoCompra.pendientes) === 0;
+
+await conn.execute(
+  `
+  UPDATE monedero_movimientos
+  SET
+    devuelto = ?,
+    solicitar_devolucion = FALSE
+  WHERE id_movimiento = ?
+  `,
+  [
+    compraDevuelta ? 1 : 0,
+    idMovimientoCompra
+  ]
+);
           // =====================================================
           // 2.10 ACTUALIZAR SALDO
           // =====================================================
