@@ -13,7 +13,8 @@ const emitirProductoUnicoLoteFactory = require('./services/emitir-producto-unico
 const crearCuentasAlumnosFactory = require("./modules/monedero/crear-cuentas-alumnos");
 const procesarRecargaReciboFactory = require("./modules/monedero/procesar-recarga-recibo");
 const cancelarCargosMensualesFactory = require("./services/cancelar-cargos-mensuales");
-const authCajaFactory = require("./modules/monedero/auth-caja");
+const authUsuariosFactory =require("./modules/auth/auth-usuarios");
+const permisosMonederoFactory = require("./modules/monedero/permisos-monedero");
 const consultarDatosFactory = require("./modules/monedero/consultar-datos");
 const procesarCompraFactory = require("./modules/monedero/procesar-compra");
 const procesarDevolucionFactory = require("./modules/monedero/procesar-devolucion");
@@ -201,25 +202,51 @@ const mailTransporter = nodemailer.createTransport({
   }
 });
 
-async function sendCajaAccessCode({
+async function sendAuthCode({
   correo,
   nombre,
-  codigo
+  codigo,
+  accion
 }) {
+
+  const asunto =
+    accion === "Restablecer"
+      ? "Restablecer PIN"
+      : "Configurar PIN";
+
   await mailTransporter.sendMail({
+
     from: config.smtp.from,
     to: correo,
-    subject: "Código de acceso a Genius Bites",
+
+    subject:
+      `${asunto} · Genius Bites`,
+
     text:
       `Hola ${nombre}.\n\n` +
-      `Tu código para ingresar a Caja es: ${codigo}\n\n` +
-      `El código vence en 10 minutos.\n` +
-      `Si no solicitaste este acceso, puedes ignorar el correo.`,
+      `Tu código de seguridad es: ${codigo}\n\n` +
+      `El código vence en 10 minutos.`,
+
     html: `
-      <div style="font-family:Arial,sans-serif;max-width:500px">
+      <div style="
+        font-family:Arial,sans-serif;
+        max-width:500px
+      ">
+
         <h2>Genius Bites</h2>
+
         <p>Hola ${nombre}.</p>
-        <p>Tu código para ingresar a Caja es:</p>
+
+        <p>
+          Tu código para
+          ${
+            accion === "Restablecer"
+              ? "restablecer"
+              : "configurar"
+          }
+          tu PIN es:
+        </p>
+
         <div style="
           font-size:32px;
           font-weight:bold;
@@ -231,15 +258,26 @@ async function sendCajaAccessCode({
         ">
           ${codigo}
         </div>
-        <p>El código vence en 10 minutos.</p>
+
+        <p>
+          El código vence en 10 minutos.
+        </p>
+
       </div>
     `
   });
 
-  logger.info("Correo de acceso de Caja enviado", {
-    correo_mascara:
-      correo.replace(/^(.{2}).*(@.*)$/, "$1***$2")
-  });
+  logger.info(
+    "Código de autenticación enviado",
+    {
+      correo_mascara:
+        correo.replace(
+          /^(.{2}).*(@.*)$/,
+          "$1***$2"
+        ),
+      accion
+    }
+  );
 }
 
 /* ================= GOOGLE CLOUD STORAGE ================= */
@@ -500,19 +538,34 @@ const procesarCompraHandler = procesarCompraFactory({
 const guardarErrorRecargaRecibo =
   monederoRecargaService.guardarErrorRecibo;
 
-  const authCajaService = authCajaFactory({
+const authService = authUsuariosFactory({
   pool,
   logger,
   secret: config.monederoAuthSecret,
-  sendAccessCode: sendCajaAccessCode
+  sendAuthCode
 });
 
 const {
-  solicitarCodigoHandler,
-  validarCodigoHandler,
-  requireCajaToken,
+  identificarUsuarioHandler,
+  solicitarCodigoPin,
+  guardarPinHandler,
+  loginPinHandler,
+  requireAuthToken,
   sesionHandler
-} = authCajaService;
+} = authService;
+
+
+const permisosMonedero =
+  permisosMonederoFactory({
+    logger
+  });
+
+const {
+  requireMonedero,
+  requireCaja,
+  requireCocina,
+  menuHandler
+} = permisosMonedero;
 
 const cancelarCargosMensualesHandler =
   cancelarCargosMensualesFactory({
@@ -817,26 +870,42 @@ app.post(
 
 app.post(
   "/monedero/devoluciones/procesar",
-  requireCajaToken,
+  requireAuthToken,
+  requireCaja,
   procesarDevolucionHandler
 );
 
 app.post(
+  "/auth/identificar",
+  identificarUsuarioHandler
+);
+
+app.post(
   "/monedero/compras/procesar",
-  requireCajaToken,
+  requireAuthToken,
+  requireCaja,
   procesarCompraHandler
 );
 
 app.get(
   "/monedero/qr/resolver/:qr_token",
-  requireCajaToken,
+  requireAuthToken,
+  requireCaja,
   resolverQrHandler
 );
 
 app.get(
   "/monedero/datos/:recurso",
-  requireCajaToken,
+  requireAuthToken,
+  requireMonedero,
   consultarDatosHandler
+);
+
+app.get(
+  "/monedero/menu",
+  requireAuthToken,
+  requireMonedero,
+  menuHandler
 );
 
 app.post(
@@ -847,30 +916,38 @@ app.post(
 
 
 
+
 app.get(
   "/monedero/qr/imprimir",
   imprimirHandler
 );
 
-// AppSheet genera el acceso inicial.
-// Protegido con el API token administrativo existente.
+// ============================================================
+// AUTH GENERAL
+// ============================================================
 
-// Lovable solicita que se envíe el código.
+// Solicitar código para establecer o restablecer PIN
 app.post(
-  "/monedero/auth/caja/solicitar-codigo",
-  solicitarCodigoHandler
+  "/auth/pin/codigo",
+  solicitarCodigoPin
 );
 
-// Lovable valida el código.
+// Confirmar código y establecer/restablecer PIN
 app.post(
-  "/monedero/auth/caja/validar-codigo",
-  validarCodigoHandler
+  "/auth/pin/guardar",
+  guardarPinHandler
 );
 
-// Lovable verifica que su sesión siga activa.
+// Login normal
+app.post(
+  "/auth/pin/login",
+  loginPinHandler
+);
+
+// Verificar sesión
 app.get(
-  "/monedero/auth/caja/sesion",
-  requireCajaToken,
+  "/auth/sesion",
+  requireAuthToken,
   sesionHandler
 );
 
