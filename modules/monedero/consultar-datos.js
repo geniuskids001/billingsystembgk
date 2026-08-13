@@ -47,7 +47,15 @@ module.exports = function consultarDatosFactory({
   usuarios: {
     vista: "vw_monedero_usuarios_acceso",
     orden: "nombre_completo ASC"
+  },
+
+    ordenes: {
+    vista: "vw_monedero_ordenes_cocina",
+    orden: "fecha_pedido ASC, id_orden ASC"
   }
+
+
+
 };
 
       const config = recursos[recurso];
