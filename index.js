@@ -20,6 +20,7 @@ const procesarCompraFactory = require("./modules/monedero/procesar-compra");
 const procesarDevolucionFactory = require("./modules/monedero/procesar-devolucion");
 const qrCuentasFactory = require("./modules/monedero/qr_cuentas");
 const procesarAjusteFactory = require("./modules/monedero/procesar-ajuste");
+const procesarReversoRecargaReciboFactory =require("./modules/monedero/procesar-reverso-recarga-recibo");
 
 console.log("DEBUG PDF IMPORT:", {
   generateReciboPDF_type: typeof generateReciboPDF,
@@ -601,6 +602,23 @@ const procesarRecargaRecibo =
 const procesarRecargaReciboHandler =
   monederoRecargaService.procesarRecargaReciboHandler;
 
+  const monederoReversoRecargaService =
+  procesarReversoRecargaReciboFactory({
+    pool,
+    executeInTransaction,
+    logger
+  });
+
+const procesarReversoRecargaRecibo =
+  monederoReversoRecargaService.procesarReversoRecargaRecibo;
+
+const procesarReversoRecargaReciboHandler =
+  monederoReversoRecargaService
+    .procesarReversoRecargaReciboHandler;
+
+const guardarErrorReversoRecargaRecibo =
+  monederoReversoRecargaService.guardarErrorRecibo;
+
   const qrCuentasService = qrCuentasFactory({
   pool,
   logger
@@ -967,6 +985,8 @@ app.post(
   crearCuentasAlumnosHandler
 );
 
+
+
 app.post(
   "/monedero/devoluciones/procesar",
   requireUsuarioOperacion,
@@ -1016,6 +1036,12 @@ app.post(
   "/monedero/ajustes/procesar",
   requireUsuarioOperacion,
   procesarAjusteHandler
+);
+
+app.post(
+  "/monedero/recargas/reversar",
+  requireToken,
+  procesarReversoRecargaReciboHandler
 );
 
 
@@ -1259,7 +1285,9 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
   }
 
   let reciboSnapshot = null;
-  let rutaPdfFinal = null;
+let rutaPdfFinal = null;
+let resultadoReverso = null;
+let reversoWarning = null;
 
   try {
     // ============================================================
@@ -1308,6 +1336,44 @@ app.post("/cancelar-recibo", requireToken, async (req, res, next) => {
         );
       }
     });
+
+    // ============================================================
+// FASE 1.5: REVERSAR RECARGA DE MONEDERO SI REALMENTE EXISTIÓ
+// ============================================================
+
+try {
+
+  resultadoReverso =
+    await procesarReversoRecargaRecibo(id_recibo);
+
+  logger.info(
+    "Validación de reverso de recarga completada",
+    {
+      id_recibo,
+      aplica: resultadoReverso.aplica,
+      procesado: resultadoReverso.procesado,
+      duplicado: resultadoReverso.duplicado
+    }
+  );
+
+} catch (reversoError) {
+
+  const mensajeReverso =
+    await guardarErrorReversoRecargaRecibo(
+      id_recibo,
+      reversoError
+    );
+
+  reversoWarning = mensajeReverso;
+
+  logger.error(
+    "Recibo cancelado pero reverso de recarga falló",
+    {
+      id_recibo,
+      error: mensajeReverso
+    }
+  );
+}
 
     // ============================================================
     // FASE 2: REGENERAR PDF (CANCELADO)
@@ -1371,12 +1437,29 @@ if (reciboParaPdf.status_recibo !== 'Cancelado') {
     // RESPUESTA EXITOSA
     // ============================================================
     res.json({
-      ok: true,
-      id_recibo,
-      status: "Cancelado",
-      ruta_pdf: rutaGs,
-      duration_ms: Date.now() - startTime
-    });
+  ok: true,
+  id_recibo,
+  status: "Cancelado",
+  ruta_pdf: rutaGs,
+
+  reverso_monedero: resultadoReverso
+    ? {
+        aplica: resultadoReverso.aplica,
+        procesado: resultadoReverso.procesado,
+        duplicado: resultadoReverso.duplicado,
+        id_movimiento_reverso:
+          resultadoReverso.id_movimiento_reverso || null,
+        monto:
+          resultadoReverso.monto || null
+      }
+    : null,
+
+  ...(reversoWarning && {
+    warning: reversoWarning
+  }),
+
+  duration_ms: Date.now() - startTime
+});
 
   } catch (error) {
     next(error);

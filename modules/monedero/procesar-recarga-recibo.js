@@ -25,7 +25,7 @@ module.exports = function procesarRecargaReciboFactory({
           WHEN error_message LIKE 'Monedero:%' THEN NULL
           ELSE error_message
         END,
-        reintentar_recarga_monedero = 0
+        reintentar_monedero = 0
       WHERE id_recibo = ?
       `,
       [idRecibo]
@@ -394,7 +394,7 @@ module.exports = function procesarRecargaReciboFactory({
         UPDATE recibos
         SET
           error_message = ?,
-          reintentar_recarga_monedero = 0
+         reintentar_monedero = 0
         WHERE id_recibo = ?
         `,
         [mensaje, idReciboLimpio]
