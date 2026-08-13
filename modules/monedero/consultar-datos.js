@@ -18,8 +18,8 @@ module.exports = function consultarDatosFactory({
       const usuario = req.caja;
 
       if (!usuario) {
-        throw crearError("Sesión de Caja requerida", 401);
-      }
+  throw crearError("Sesión de Genius Bites requerida", 401);
+}
 
       const rol = String(usuario.rol || "")
         .trim()
@@ -115,6 +115,12 @@ module.exports = function consultarDatosFactory({
           where.push("id_plantel = ?");
           params.push(usuario.id_plantel);
         }
+      
+         else if (recurso === "ordenes") {
+    where.push("id_maestro = ?");
+    params.push(usuario.id_usuario);
+  }
+        
       }
 
       // PERSONAL DE PLANTEL
