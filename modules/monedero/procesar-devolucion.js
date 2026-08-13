@@ -726,19 +726,20 @@ await conn.execute(
             if (cantidadPendiente === 0) {
 
               await conn.execute(
-                `
-                UPDATE monedero_ordenes
-                SET
-                  status_orden = 'Cancelado',
-                  fecha_cancelacion = NOW()
-                WHERE id_orden = ?
-                  AND status_orden IN (
-                    'Pedido',
-                    'Preparado'
-                  )
-                `,
-                [orden.id_orden]
-              );
+  `
+  UPDATE monedero_ordenes
+  SET
+    status_orden = 'Cancelado',
+    fecha_cancelacion = NOW(),
+    id_usuario_cancelacion = ?
+  WHERE id_orden = ?
+    AND status_orden IN (
+      'Pedido',
+      'Preparado'
+    )
+  `,
+  [idUsuario, orden.id_orden]
+);
 
               ordenCancelada = true;
             }
