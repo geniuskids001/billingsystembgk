@@ -18,6 +18,7 @@ module.exports = function procesarEstadoOrdenFactory({
     const startTime = Date.now();
 
     try {
+
       const idOrden = String(
         req.body?.id_orden || ""
       ).trim();
@@ -35,27 +36,28 @@ module.exports = function procesarEstadoOrdenFactory({
 
       if (!idOrden) {
         throw crearError(
-          "id_orden es requerido",
+          "No pudimos identificar la orden. Actualiza la pantalla e inténtalo nuevamente.",
           400
         );
       }
 
       if (
         ![
+          "Pedido",
           "Preparado",
           "Entregado",
           "Cancelado"
         ].includes(statusOrden)
       ) {
         throw crearError(
-          "Estado de orden no válido",
+          "Selecciona un estado válido para la orden.",
           400
         );
       }
 
       if (!idUsuario) {
         throw crearError(
-          "No fue posible identificar al usuario",
+          "No pudimos identificar tu sesión. Vuelve a iniciar sesión e inténtalo nuevamente.",
           401
         );
       }
@@ -67,6 +69,10 @@ module.exports = function procesarEstadoOrdenFactory({
       const resultado =
         await executeInTransaction(
           async (conn) => {
+
+            // =================================================
+            // 2.1 BLOQUEAR Y OBTENER ORDEN
+            // =================================================
 
             const [[orden]] =
               await conn.execute(
@@ -83,38 +89,89 @@ module.exports = function procesarEstadoOrdenFactory({
 
             if (!orden) {
               throw crearError(
-                "La orden no existe",
+                "Esta orden ya no está disponible. Actualiza la pantalla para ver la información más reciente.",
                 404
               );
             }
 
-            // Ya está en ese estado:
-            // respuesta idempotente, no duplicamos nada.
+            // =================================================
+            // 2.2 IDEMPOTENCIA / DOBLE TAP
+            // =================================================
+
             if (
               orden.status_orden ===
               statusOrden
             ) {
+
               return {
                 id_orden: idOrden,
-                status_orden: statusOrden,
+                status_anterior:
+                  orden.status_orden,
+                status_orden:
+                  statusOrden,
                 procesado: false,
-                duplicado: true
+                duplicado: true,
+                mensaje:
+                  `La orden ya se encuentra como ${statusOrden}.`
               };
             }
 
             // =================================================
-            // 3. ACTUALIZAR ESTADO + USUARIO + FECHA
+            // 2.3 CAMBIAR A PEDIDO
+            //
+            // Regresar a Pedido significa reiniciar el flujo
+            // operativo de cocina.
             // =================================================
 
-            if (statusOrden === "Preparado") {
+            if (statusOrden === "Pedido") {
+
+              await conn.execute(
+                `
+                UPDATE monedero_ordenes
+                SET
+                  status_orden = 'Pedido',
+
+                  fecha_preparacion = NULL,
+                  id_usuario_preparacion = NULL,
+
+                  fecha_entrega = NULL,
+                  id_usuario_entrega = NULL,
+
+                  fecha_cancelacion = NULL,
+                  id_usuario_cancelacion = NULL
+
+                WHERE id_orden = ?
+                `,
+                [idOrden]
+              );
+            }
+
+            // =================================================
+            // 2.4 CAMBIAR A PREPARADO
+            //
+            // Si venía de Entregado, se elimina la entrega
+            // porque fue corregida.
+            // =================================================
+
+            else if (
+              statusOrden === "Preparado"
+            ) {
 
               await conn.execute(
                 `
                 UPDATE monedero_ordenes
                 SET
                   status_orden = 'Preparado',
+
                   fecha_preparacion = NOW(),
-                  id_usuario_preparacion = ?
+                  id_usuario_preparacion = ?,
+
+                  fecha_entrega = NULL,
+                  id_usuario_entrega = NULL,
+
+                  fecha_cancelacion = NULL,
+                  id_usuario_cancelacion = NULL
+
                 WHERE id_orden = ?
                 `,
                 [
@@ -122,8 +179,15 @@ module.exports = function procesarEstadoOrdenFactory({
                   idOrden
                 ]
               );
+            }
 
-            } else if (
+            // =================================================
+            // 2.5 CAMBIAR A ENTREGADO
+            //
+            // Conservamos fecha_preparacion si ya existía.
+            // =================================================
+
+            else if (
               statusOrden === "Entregado"
             ) {
 
@@ -132,25 +196,13 @@ module.exports = function procesarEstadoOrdenFactory({
                 UPDATE monedero_ordenes
                 SET
                   status_orden = 'Entregado',
+
                   fecha_entrega = NOW(),
-                  id_usuario_entrega = ?
-                WHERE id_orden = ?
-                `,
-                [
-                  idUsuario,
-                  idOrden
-                ]
-              );
+                  id_usuario_entrega = ?,
 
-            } else {
+                  fecha_cancelacion = NULL,
+                  id_usuario_cancelacion = NULL
 
-              await conn.execute(
-                `
-                UPDATE monedero_ordenes
-                SET
-                  status_orden = 'Cancelado',
-                  fecha_cancelacion = NOW(),
-                  id_usuario_cancelacion = ?
                 WHERE id_orden = ?
                 `,
                 [
@@ -160,37 +212,87 @@ module.exports = function procesarEstadoOrdenFactory({
               );
             }
 
+            // =================================================
+            // 2.6 CAMBIAR A CANCELADO
+            // =================================================
+
+            else if (
+              statusOrden === "Cancelado"
+            ) {
+
+              await conn.execute(
+                `
+                UPDATE monedero_ordenes
+                SET
+                  status_orden = 'Cancelado',
+
+                  fecha_cancelacion = NOW(),
+                  id_usuario_cancelacion = ?
+
+                WHERE id_orden = ?
+                `,
+                [
+                  idUsuario,
+                  idOrden
+                ]
+              );
+            }
+
+            // =================================================
+            // 2.7 LOG
+            // =================================================
+
             logger.info(
               "Estado de orden Genius Bites actualizado",
               {
-                id_orden: idOrden,
+                id_orden:
+                  idOrden,
+
                 status_anterior:
                   orden.status_orden,
+
                 status_nuevo:
                   statusOrden,
+
                 id_usuario:
                   idUsuario
               }
             );
 
             return {
-              id_orden: idOrden,
+              id_orden:
+                idOrden,
+
               status_anterior:
                 orden.status_orden,
+
               status_orden:
                 statusOrden,
-              procesado: true,
-              duplicado: false
+
+              procesado:
+                true,
+
+              duplicado:
+                false,
+
+              mensaje:
+                `Orden actualizada a ${statusOrden}.`
             };
           }
         );
 
-      return res.status(200).json({
-        ok: true,
-        ...resultado,
-        duration_ms:
-          Date.now() - startTime
-      });
+      // =====================================================
+      // 3. RESPUESTA
+      // =====================================================
+
+      return res
+        .status(200)
+        .json({
+          ok: true,
+          ...resultado,
+          duration_ms:
+            Date.now() - startTime
+        });
 
     } catch (error) {
 
@@ -199,18 +301,29 @@ module.exports = function procesarEstadoOrdenFactory({
           "Monedero:"
         )
           ? error.message
-          : "Monedero: No fue posible actualizar la orden";
+          : "Monedero: No pudimos actualizar la orden. Inténtalo nuevamente.";
 
       logger.error(
         "Error actualizando orden Genius Bites",
         {
           id_orden:
-            req.body?.id_orden || null,
+            req.body?.id_orden ||
+            null,
+
+          status_solicitado:
+            req.body?.status_orden ||
+            null,
+
           id_usuario:
             req.usuario?.id_usuario ||
             null,
+
           error:
             error.message,
+
+          status_code:
+            error.statusCode || 500,
+
           duration_ms:
             Date.now() - startTime
         }
@@ -222,7 +335,9 @@ module.exports = function procesarEstadoOrdenFactory({
         )
         .json({
           ok: false,
-          error: mensaje
+          error: mensaje,
+          duration_ms:
+            Date.now() - startTime
         });
     }
   };
