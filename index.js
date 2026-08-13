@@ -21,6 +21,7 @@ const procesarDevolucionFactory = require("./modules/monedero/procesar-devolucio
 const qrCuentasFactory = require("./modules/monedero/qr_cuentas");
 const procesarAjusteFactory = require("./modules/monedero/procesar-ajuste");
 const procesarReversoRecargaReciboFactory =require("./modules/monedero/procesar-reverso-recarga-recibo");
+const procesarEstadoOrdenFactory = require("./modules/monedero/procesar-estado-orden");
 
 console.log("DEBUG PDF IMPORT:", {
   generateReciboPDF_type: typeof generateReciboPDF,
@@ -619,6 +620,12 @@ const procesarReversoRecargaReciboHandler =
 const guardarErrorReversoRecargaRecibo =
   monederoReversoRecargaService.guardarErrorRecibo;
 
+  const procesarEstadoOrdenHandler =
+  procesarEstadoOrdenFactory({
+    executeInTransaction,
+    logger
+  });
+
   const qrCuentasService = qrCuentasFactory({
   pool,
   logger
@@ -1019,6 +1026,8 @@ app.get(
   consultarDatosHandler
 );
 
+
+
 app.get(
   "/monedero/menu",
   requireAuthToken,
@@ -1044,6 +1053,12 @@ app.post(
   procesarReversoRecargaReciboHandler
 );
 
+app.post(
+  "/monedero/cocina/ordenes/estado",
+  requireAuthToken,
+  requireCocina,
+  procesarEstadoOrdenHandler
+);
 
 
 app.get(
