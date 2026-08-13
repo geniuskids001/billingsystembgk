@@ -224,23 +224,36 @@ module.exports = function procesarDevolucionFactory({
           // =====================================================
 
           const [detallesCompra] = await conn.execute(
-            `
-            SELECT
-  d.id_movimiento_detalle,
-  d.id_producto_monedero,
-  d.nombre_producto,
-  d.requiere_preparacion,
-  d.cantidad,
-  d.precio_unitario,
-  d.cantidad_devuelta
+  `
+  SELECT
+    d.id_movimiento_detalle,
+    d.id_producto_monedero,
+    d.nombre_producto,
+    d.requiere_preparacion,
+    d.cantidad,
+    d.precio_unitario,
 
-FROM monedero_movimiento_detalles d
-WHERE d.id_movimiento = ?
-            `,
-            [
-              idMovimientoCompra
-            ]
-          );
+    COALESCE((
+      SELECT SUM(dd.cantidad)
+      FROM monedero_movimientos dev
+
+      JOIN monedero_movimiento_detalles dd
+        ON dd.id_movimiento = dev.id_movimiento
+
+      WHERE dev.tipo_movimiento = 'Devolucion'
+        AND dev.id_movimiento_origen = ?
+        AND dd.id_movimiento_detalle_origen =
+            d.id_movimiento_detalle
+    ), 0) AS cantidad_devuelta
+
+  FROM monedero_movimiento_detalles d
+  WHERE d.id_movimiento = ?
+  `,
+  [
+    idMovimientoCompra,
+    idMovimientoCompra
+  ]
+);
 
           if (detallesCompra.length === 0) {
             throw crearError(
@@ -248,6 +261,58 @@ WHERE d.id_movimiento = ?
               409
             );
           }
+
+
+          // =====================================================
+// 2.4.1 SINCRONIZAR CACHE CON HISTORIAL REAL
+// =====================================================
+
+// cantidad_devuelta obtenida arriba viene del SUM real
+// de movimientos Devolucion + id_movimiento_origen.
+
+for (const detalle of detallesCompra) {
+
+  const cantidadDevueltaReal =
+    Number(detalle.cantidad_devuelta || 0);
+
+  await conn.execute(
+    `
+    UPDATE monedero_movimiento_detalles
+    SET
+      cantidad_devuelta = ?,
+      devuelto = (? >= cantidad)
+    WHERE id_movimiento_detalle = ?
+    `,
+    [
+      cantidadDevueltaReal,
+      cantidadDevueltaReal,
+      detalle.id_movimiento_detalle
+    ]
+  );
+}
+
+// Sincronizar también el boolean del movimiento padre
+const [[estadoCompraSync]] = await conn.execute(
+  `
+  SELECT COUNT(*) AS pendientes
+  FROM monedero_movimiento_detalles
+  WHERE id_movimiento = ?
+    AND cantidad_devuelta < cantidad
+  `,
+  [idMovimientoCompra]
+);
+
+await conn.execute(
+  `
+  UPDATE monedero_movimientos
+  SET devuelto = ?
+  WHERE id_movimiento = ?
+  `,
+  [
+    Number(estadoCompraSync.pendientes) === 0 ? 1 : 0,
+    idMovimientoCompra
+  ]
+);
 
           // =====================================================
           // 2.5 DETERMINAR QUÉ SE VA A DEVOLVER
