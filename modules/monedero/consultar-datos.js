@@ -124,19 +124,40 @@ module.exports = function consultarDatosFactory({
       }
 
       // PERSONAL DE PLANTEL
-      else if (
-        ["coordinador", "administrativo", "auxiliar"].includes(rol)
-      ) {
-        if (!usuario.id_plantel) {
-          throw crearError(
-            "El usuario no tiene plantel asignado",
-            403
-          );
-        }
+      // COORDINADOR / ADMINISTRADOR → TODO SU PLANTEL
+else if (
+  ["coordinador", "administrador"].includes(rol)
+) {
+  if (!usuario.id_plantel) {
+    throw crearError(
+      "El usuario no tiene plantel asignado",
+      403
+    );
+  }
 
-        where.push("id_plantel = ?");
-        params.push(usuario.id_plantel);
-      }
+  where.push("id_plantel = ?");
+  params.push(usuario.id_plantel);
+}
+
+// AUXILIAR → SOLO COCINA
+else if (rol === "auxiliar") {
+  if (!usuario.id_plantel) {
+    throw crearError(
+      "El usuario no tiene plantel asignado",
+      403
+    );
+  }
+
+  if (recurso !== "ordenes") {
+    throw crearError(
+      "El usuario Auxiliar solo tiene acceso al módulo Cocina",
+      403
+    );
+  }
+
+  where.push("id_plantel = ?");
+  params.push(usuario.id_plantel);
+}
 
       // CUALQUIER OTRO ROL
       else {
