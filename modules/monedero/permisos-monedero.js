@@ -8,7 +8,7 @@ module.exports = function permisosMonederoFactory({
       "cocina"
     ],
 
-    administrativo: [
+    administrador: [
       "caja",
       "cocina"
     ],
@@ -22,7 +22,7 @@ module.exports = function permisosMonederoFactory({
       "cocina"
     ],
 
-    maestro: []
+    maestro: ["caja"]
   };
 
   function obtenerPermisos(rol) {
